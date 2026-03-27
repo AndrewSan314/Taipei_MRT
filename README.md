@@ -5,6 +5,7 @@ Minimal Python web app for subway routing using FastAPI and a custom Dijkstra en
 The frontend now uses:
 - `map/geography/taipei-vector-map-2022.svg` for real-map point picking
 - `map/diagram/taipei_mrt_interactive.svg` as the semantic subway diagram surface
+- `/gis` MapLibre WebGL studio for smoother pan/zoom and GIS-ready integration
 
 The interactive subway SVG is generated from the MetroMapMaker export by:
 
@@ -20,6 +21,7 @@ python IT3160-SubwayWeb\scripts\map\normalize_metromapmaker_svg.py `
 - `app/static/route-studio` contains the main demo page.
 - `app/static/calibration` contains the calibration tool.
 - `app/static/builder` contains the graph builder.
+- `app/static/gis-studio` contains the GIS WebGL studio.
 - `app/static/shared` contains shared UI shell styles.
 - `docs/architecture` stores codebase structure docs.
 - `docs/planning` stores task allocation and planning docs.
@@ -42,6 +44,22 @@ http://127.0.0.1:8010/builder
 ```
 
 Use it to rebuild the subway graph directly on top of the semantic SVG diagram.
+
+GIS studio:
+
+```powershell
+http://127.0.0.1:8010/gis
+```
+
+`/api/gis/network` loads QGIS exports from `app/data/gis/stations.geojson` and
+`app/data/gis/lines.geojson` when available (EPSG:4326). If missing, it falls back
+to projected coordinates from legacy pixel data.
+
+GIS point routing:
+
+- User can click any two points on map (not required to click stations).
+- Backend snaps to nearest station, computes subway route, and returns access/egress walking legs.
+- Endpoint: `POST /api/gis/route/points`
 
 ## Run
 

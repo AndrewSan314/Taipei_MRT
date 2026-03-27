@@ -25,11 +25,14 @@ const state = {
   diagramSvgUrl: null,
   lineColorEntries: [],
   zoomControllers: {},
+  viaStationIds: [],
 };
 
 const REAL_DRAW = {
   anchorRadius: 18,
   pointRadius: 42,
+  labelOffsetX: 26,
+  labelOffsetY: 18,
 };
 
 const DIAGRAM_DRAW = {
@@ -46,6 +49,7 @@ const ZOOM = {
   maxWheelFactor: 1.16,
   animationMs: 150,
   dragThreshold: 6,
+  realMapLabelScaleThreshold: 2.3,
 };
 
 const elements = {
@@ -58,6 +62,10 @@ const elements = {
   selectionMeta: document.getElementById("selectionMeta"),
   summary: document.getElementById("summary"),
   steps: document.getElementById("steps"),
+  viaStationSelect: document.getElementById("viaStationSelect"),
+  addViaStationBtn: document.getElementById("addViaStationBtn"),
+  clearViaStationsBtn: document.getElementById("clearViaStationsBtn"),
+  viaStationList: document.getElementById("viaStationList"),
   realMapSurface: document.getElementById("realMapSurface"),
   realMapStage: document.getElementById("realMapStage"),
   realMapImage: document.getElementById("realMapImage"),
@@ -116,6 +124,8 @@ function buildLookups() {
       rgb,
     });
   });
+
+  renderViaStationSelector();
 }
 
 function refreshProjectedStations() {
@@ -152,6 +162,8 @@ function bindEvents() {
   elements.armEndBtn.addEventListener("click", () => setPickMode("end"));
   elements.findRouteBtn.addEventListener("click", findRouteForPoints);
   elements.resetBtn.addEventListener("click", resetRouteState);
+  elements.addViaStationBtn.addEventListener("click", addViaStationFromSelector);
+  elements.clearViaStationsBtn.addEventListener("click", clearViaStations);
   elements.zoomButtons.forEach((button) => {
     button.addEventListener("click", () => {
       const action = button.dataset.zoomAction;
@@ -163,6 +175,100 @@ function bindEvents() {
     });
   });
   window.addEventListener("resize", handleWindowResize);
+}
+
+function renderViaStationSelector() {
+  if (!elements.viaStationSelect) {
+    return;
+  }
+
+  const selectedValue = elements.viaStationSelect.value;
+  const options = state.network.stations
+    .slice()
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((station) => {
+      const isSelected = station.id === selectedValue ? ' selected="selected"' : "";
+      return `<option value="${station.id}"${isSelected}>${escapeHtml(station.name)} (${escapeHtml(station.id)})</option>`;
+    })
+    .join("");
+
+  elements.viaStationSelect.innerHTML = options;
+}
+
+function addViaStationFromSelector() {
+  const stationId = elements.viaStationSelect?.value;
+  if (!stationId) {
+    return;
+  }
+
+  if (state.viaStationIds.includes(stationId)) {
+    setStatus("This stopover station is already in the list.");
+    return;
+  }
+
+  state.viaStationIds.push(stationId);
+  state.routeResult = null;
+  renderViaStations();
+  renderSelectionMeta();
+  renderSummary();
+  renderSteps();
+  setStatus("Stopover added. Re-run route search to apply.");
+}
+
+function clearViaStations() {
+  if (!state.viaStationIds.length) {
+    return;
+  }
+
+  state.viaStationIds = [];
+  state.routeResult = null;
+  renderViaStations();
+  renderSelectionMeta();
+  renderSummary();
+  renderSteps();
+  setStatus("Stopovers cleared.");
+}
+
+function removeViaStation(stationId) {
+  state.viaStationIds = state.viaStationIds.filter((currentStationId) => currentStationId !== stationId);
+  state.routeResult = null;
+  renderViaStations();
+  renderSelectionMeta();
+  renderSummary();
+  renderSteps();
+  setStatus("Stopover removed. Re-run route search to apply.");
+}
+
+function renderViaStations() {
+  if (!elements.viaStationList) {
+    return;
+  }
+
+  if (!state.viaStationIds.length) {
+    elements.viaStationList.classList.add("empty");
+    elements.viaStationList.textContent = "No stopovers selected.";
+    return;
+  }
+
+  elements.viaStationList.classList.remove("empty");
+  elements.viaStationList.innerHTML = state.viaStationIds
+    .map((stationId, index) => {
+      const station = state.stationLookup.get(stationId);
+      const label = station ? `${station.name} (${station.id})` : stationId;
+      return `
+        <div class="via-station-row">
+          <span>${index + 1}. ${escapeHtml(label)}</span>
+          <button class="secondary via-remove-btn" type="button" data-via-station-id="${stationId}">Remove</button>
+        </div>
+      `;
+    })
+    .join("");
+
+  elements.viaStationList.querySelectorAll("[data-via-station-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      removeViaStation(button.dataset.viaStationId);
+    });
+  });
 }
 
 function setPickMode(mode) {
@@ -223,6 +329,7 @@ async function findRouteForPoints() {
       end_x: state.endPoint.x,
       end_y: state.endPoint.y,
       walking_seconds_per_pixel: 1.0,
+      via_station_ids: state.viaStationIds,
     };
     if (state.network.map.supports_line_hints) {
       payload.start_preferred_line_ids = state.pointLineHints.start;
@@ -644,6 +751,7 @@ function resetRouteState() {
   state.endPoint = null;
   state.pickMode = "start";
   state.routeResult = null;
+  state.viaStationIds = [];
   state.pointLineHints.start = [];
   state.pointLineHints.end = [];
   resetAllZoom();
@@ -655,6 +763,7 @@ function renderAll() {
   updatePickModeUi();
   renderRealMap();
   renderDiagram();
+  renderViaStations();
   renderSelectionMeta();
   renderSummary();
   renderSteps();
@@ -664,15 +773,18 @@ function renderRealMap() {
   const route = state.routeResult;
   const selectedStartStation = route?.selected_start_station;
   const selectedEndStation = route?.selected_end_station;
+  const activeStationIds = new Set(route?.route?.station_ids || []);
 
   const stationMarkup = state.network.stations
     .map((station) =>
       renderRealStationAnchor(
         station,
         station.id === selectedStartStation?.id || station.id === selectedEndStation?.id,
+        activeStationIds.has(station.id),
       ),
     )
     .join("");
+  const routeMarkup = renderRealRouteSegments(route?.route);
 
   const connectorMarkup = [
     renderWalkingConnector(state.startPoint, selectedStartStation),
@@ -689,20 +801,78 @@ function renderRealMap() {
     .join("");
 
   elements.realMapOverlay.innerHTML = `
+    <g class="real-route">${routeMarkup}</g>
     <g class="real-connectors">${connectorMarkup}</g>
     <g class="real-stations">${stationMarkup}</g>
     <g class="real-points">${pointMarkup}</g>
   `;
 }
 
-function renderRealStationAnchor(station, isSelected) {
+function renderRealStationAnchor(station, isSelected, isRouteActive) {
+  const nodeClasses = ["real-station-node"];
+  if (isRouteActive) {
+    nodeClasses.push("is-route-active");
+  }
+  if (isSelected) {
+    nodeClasses.push("is-selected");
+  }
+
+  const classes = ["real-station-anchor"];
+  if (isRouteActive) {
+    classes.push("is-route-active");
+  }
+  if (isSelected) {
+    classes.push("is-selected");
+  }
+
   return `
-    <circle
-      class="real-station-anchor ${isSelected ? "is-selected" : ""}"
-      cx="${station.x}"
-      cy="${station.y}"
-      r="${REAL_DRAW.anchorRadius}"
-    ></circle>
+    <g class="${nodeClasses.join(" ")}">
+      <circle
+        class="${classes.join(" ")}"
+        cx="${station.x}"
+        cy="${station.y}"
+        r="${REAL_DRAW.anchorRadius}"
+      ></circle>
+      <text
+        class="real-station-label"
+        x="${station.x + REAL_DRAW.labelOffsetX}"
+        y="${station.y - REAL_DRAW.labelOffsetY}"
+      >${escapeHtml(station.name)}</text>
+    </g>
+  `;
+}
+
+function renderRealRouteSegments(routePayload) {
+  if (!routePayload?.steps?.length) {
+    return "";
+  }
+
+  return routePayload.steps
+    .map((step) => renderRealRouteSegment(step))
+    .filter(Boolean)
+    .join("");
+}
+
+function renderRealRouteSegment(step) {
+  if (step.kind === "transfer" || !step.next_station_id) {
+    return "";
+  }
+
+  const fromStation = state.stationLookup.get(step.station_id);
+  const toStation = state.stationLookup.get(step.next_station_id);
+  if (!fromStation || !toStation) {
+    return "";
+  }
+
+  const kindClass = step.kind === "walk" ? "is-walk" : "is-ride";
+  return `
+    <line
+      class="real-route-segment ${kindClass}"
+      x1="${fromStation.x}"
+      y1="${fromStation.y}"
+      x2="${toStation.x}"
+      y2="${toStation.y}"
+    ></line>
   `;
 }
 
@@ -934,6 +1104,12 @@ function renderSelectionMeta() {
       ),
     );
   }
+  if (state.viaStationIds.length) {
+    const viaLabel = state.viaStationIds
+      .map((stationId) => state.stationLookup.get(stationId)?.name || stationId)
+      .join(" -> ");
+    blocks.push(renderMetricCard("Stopovers", viaLabel));
+  }
 
   if (!blocks.length) {
     elements.selectionMeta.classList.add("empty");
@@ -954,6 +1130,10 @@ function renderSummary() {
 
   const route = state.routeResult.route;
   const lineLabels = route.line_labels.length ? route.line_labels.join(" -> ") : "No train ride";
+  const viaStations = state.routeResult.via_stations || [];
+  const viaLabel = viaStations.length
+    ? viaStations.map((station) => station.name).join(" -> ")
+    : "None";
 
   elements.summary.classList.remove("empty");
   elements.summary.innerHTML = [
@@ -967,6 +1147,7 @@ function renderSummary() {
       "Chosen stations",
       `${state.routeResult.selected_start_station.name} -> ${state.routeResult.selected_end_station.name}`,
     ),
+    renderMetricCard("Stopovers", viaLabel),
     renderMetricCard("Line sequence", lineLabels),
   ].join("");
 }
@@ -1824,6 +2005,12 @@ function clampPan(controller) {
 function applyZoomTransform(controller) {
   controller.stage.style.transform = `translate3d(${controller.translateX}px, ${controller.translateY}px, 0) scale(${controller.scale})`;
   controller.surface.classList.toggle("is-zoomed", controller.scale > 1);
+  if (controller.name === "real") {
+    controller.surface.classList.toggle(
+      "is-label-zoom",
+      controller.scale >= ZOOM.realMapLabelScaleThreshold,
+    );
+  }
 }
 
 function triggerZoomAnimation(controller) {

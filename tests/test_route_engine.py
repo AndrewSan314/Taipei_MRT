@@ -140,6 +140,33 @@ class RouteEngineTests(unittest.TestCase):
         self.assertEqual(result["selected_end_station"]["id"], "R5")
         self.assertEqual(result["route"]["line_sequence"], ["red"])
 
+    def test_route_through_waypoints_enforces_stopover_station(self):
+        engine = make_engine()
+
+        result = engine.find_route_through_stations(["B1", "R5", "G5"])
+
+        self.assertEqual(result.station_ids[0], "B1")
+        self.assertEqual(result.station_ids[-1], "G5")
+        self.assertIn("R5", result.station_ids)
+        self.assertGreater(result.station_ids.index("R5"), 0)
+
+    def test_point_route_respects_via_station_ids(self):
+        engine = make_engine()
+
+        result = engine.find_best_route_for_points(
+            start_x=336,
+            start_y=252,
+            end_x=444,
+            end_y=28,
+            walking_seconds_per_pixel=1.0,
+            via_station_ids=["R5"],
+        )
+
+        self.assertEqual(result["selected_start_station"]["id"], "B1")
+        self.assertEqual(result["selected_end_station"]["id"], "G5")
+        self.assertIn("R5", result["route"]["station_ids"])
+        self.assertEqual([station["id"] for station in result["via_stations"]], ["R5"])
+
     def test_generated_walk_transfers_create_walk_steps_between_nearby_stations(self):
         raw = {
             "stations": [

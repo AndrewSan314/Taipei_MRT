@@ -168,6 +168,16 @@ button:hover {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.control-select {
+  width: 100%;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--text);
+  background: #ffffff;
+}
+
 .primary {
   background: linear-gradient(135deg, var(--accent), #ffdd6e);
   color: #13151a;
@@ -229,6 +239,34 @@ button:hover {
   display: block;
   margin-top: 6px;
   font-size: 1.05rem;
+}
+
+.via-station-list {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.via-station-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.03);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.via-station-row span {
+  font-size: 0.9rem;
+}
+
+.via-remove-btn {
+  width: auto;
+  flex-shrink: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
 }
 
 .map-stack {
@@ -428,9 +466,51 @@ button:hover {
   stroke-width: 8;
 }
 
+.real-station-anchor.is-route-active {
+  fill: rgba(61, 109, 242, 0.18);
+  stroke: rgba(61, 109, 242, 0.82);
+}
+
 .real-station-anchor.is-selected {
   fill: rgba(244, 185, 66, 0.18);
   stroke: var(--accent);
+}
+
+.real-station-label {
+  fill: #0b1220;
+  font-size: 26px;
+  font-family: "Space Grotesk", sans-serif;
+  font-weight: 700;
+  paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.96);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+}
+
+#realMapSurface.is-label-zoom .real-station-label {
+  opacity: 0.96;
+}
+
+.real-route-segment {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.real-route-segment.is-ride {
+  stroke: rgba(61, 109, 242, 0.88);
+  stroke-width: 14;
+  filter: drop-shadow(0 0 8px rgba(61, 109, 242, 0.38));
+}
+
+.real-route-segment.is-walk {
+  stroke: rgba(230, 169, 26, 0.92);
+  stroke-width: 12;
+  stroke-dasharray: 22 14;
 }
 
 .walking-connector {

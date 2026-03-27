@@ -34,3 +34,8 @@ async def calibrate():
 @app.get("/builder")
 async def builder():
     return FileResponse(Path(settings.static_dir) / "builder" / "index.html")
+
+
+@app.get("/gis")
+async def gis():
+    return FileResponse(Path(settings.static_dir) / "gis-studio" / "index.html")

@@ -8,6 +8,10 @@ from fastapi import HTTPException
 
 from app.config import get_settings
 from app.services.calibration_store import save_station_positions
+from app.services.gis_loader import build_gis_payload
+from app.services.gis_route import extract_station_coordinates
+from app.services.gis_route import nearest_station
+from app.services.gis_route import walking_time_sec
 from app.services.subway_network_store import load_network_definition
 from app.services.subway_network_store import save_network_definition
 from app.services.runtime import get_network as get_subway_network
@@ -21,6 +25,7 @@ settings = get_settings()
 class RouteRequest(BaseModel):
     start_station_id: str
     end_station_id: str
+    via_station_ids: list[str] = Field(default_factory=list)
 
 
 class PointRouteRequest(BaseModel):
@@ -33,6 +38,16 @@ class PointRouteRequest(BaseModel):
     max_station_walk_sec: int | None = None
     start_preferred_line_ids: list[str] = Field(default_factory=list)
     end_preferred_line_ids: list[str] = Field(default_factory=list)
+    via_station_ids: list[str] = Field(default_factory=list)
+
+
+class GisPointRouteRequest(BaseModel):
+    start_lon: float
+    start_lat: float
+    end_lon: float
+    end_lat: float
+    walking_m_per_sec: float = 1.3
+    via_station_ids: list[str] = Field(default_factory=list)
 
 
 class CalibrationStationPayload(BaseModel):
@@ -271,6 +286,112 @@ async def get_network():
     return _network_payload()
 
 
+@router.get("/gis/network")
+async def get_gis_network():
+    network = get_subway_network()
+    fallback_bounds = (
+        settings.fallback_min_lon,
+        settings.fallback_min_lat,
+        settings.fallback_max_lon,
+        settings.fallback_max_lat,
+    )
+    return build_gis_payload(
+        network=network,
+        qgis_geojson_dir=settings.qgis_geojson_dir,
+        map_width=settings.map_width,
+        map_height=settings.map_height,
+        fallback_bounds=fallback_bounds,
+    )
+
+
+@router.post("/gis/route/points")
+async def get_gis_route_for_points(request: GisPointRouteRequest):
+    if request.walking_m_per_sec <= 0:
+        raise HTTPException(status_code=400, detail="walking_m_per_sec must be > 0")
+
+    network = get_subway_network()
+    for via_station_id in request.via_station_ids:
+        if via_station_id not in network.stations:
+            raise HTTPException(status_code=400, detail=f"Unknown via station: {via_station_id}")
+
+    fallback_bounds = (
+        settings.fallback_min_lon,
+        settings.fallback_min_lat,
+        settings.fallback_max_lon,
+        settings.fallback_max_lat,
+    )
+    gis_payload = build_gis_payload(
+        network=network,
+        qgis_geojson_dir=settings.qgis_geojson_dir,
+        map_width=settings.map_width,
+        map_height=settings.map_height,
+        fallback_bounds=fallback_bounds,
+    )
+    station_coords_by_id = extract_station_coordinates(gis_payload["stations"])
+    if not station_coords_by_id:
+        raise HTTPException(status_code=500, detail="GIS station coordinates are unavailable")
+
+    try:
+        selected_start_station_id, access_walk_distance_m = nearest_station(
+            request.start_lon,
+            request.start_lat,
+            station_coords_by_id,
+        )
+        selected_end_station_id, egress_walk_distance_m = nearest_station(
+            request.end_lon,
+            request.end_lat,
+            station_coords_by_id,
+        )
+
+        engine = get_route_engine()
+        route_result = engine.find_route_through_stations(
+            [
+                selected_start_station_id,
+                *request.via_station_ids,
+                selected_end_station_id,
+            ]
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    access_walk_time_sec = walking_time_sec(access_walk_distance_m, request.walking_m_per_sec)
+    egress_walk_time_sec = walking_time_sec(egress_walk_distance_m, request.walking_m_per_sec)
+    station_lookup = _station_lookup_payload()
+    route_payload = _enrich_route_payload(route_result.to_dict(), station_lookup, network)
+
+    return {
+        "source": gis_payload["source"],
+        "start_point": {"lon": request.start_lon, "lat": request.start_lat},
+        "end_point": {"lon": request.end_lon, "lat": request.end_lat},
+        "selected_start_station": {
+            **station_lookup[selected_start_station_id],
+            "lon": station_coords_by_id[selected_start_station_id][0],
+            "lat": station_coords_by_id[selected_start_station_id][1],
+        },
+        "selected_end_station": {
+            **station_lookup[selected_end_station_id],
+            "lon": station_coords_by_id[selected_end_station_id][0],
+            "lat": station_coords_by_id[selected_end_station_id][1],
+        },
+        "via_stations": [
+            {
+                **station_lookup[station_id],
+                "lon": station_coords_by_id.get(station_id, (None, None))[0],
+                "lat": station_coords_by_id.get(station_id, (None, None))[1],
+            }
+            for station_id in request.via_station_ids
+        ],
+        "access_walk_distance_m": round(access_walk_distance_m, 1),
+        "egress_walk_distance_m": round(egress_walk_distance_m, 1),
+        "access_walk_time_sec": access_walk_time_sec,
+        "egress_walk_time_sec": egress_walk_time_sec,
+        "total_journey_time_sec": (
+            route_payload["total_time_sec"] + access_walk_time_sec + egress_walk_time_sec
+        ),
+        "route": route_payload,
+    }
+
+
 @router.get("/builder/network")
 async def get_builder_network():
     payload = load_network_definition(settings.data_file)
@@ -284,7 +405,13 @@ async def get_route(request: RouteRequest):
     engine = get_route_engine()
     network = get_subway_network()
     try:
-        result = engine.find_route(request.start_station_id, request.end_station_id)
+        result = engine.find_route_through_stations(
+            [
+                request.start_station_id,
+                *request.via_station_ids,
+                request.end_station_id,
+            ]
+        )
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
@@ -308,6 +435,7 @@ async def get_route_for_points(request: PointRouteRequest):
             else settings.point_route_max_station_walk_sec,
             start_preferred_line_ids=request.start_preferred_line_ids,
             end_preferred_line_ids=request.end_preferred_line_ids,
+            via_station_ids=request.via_station_ids,
         )
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
