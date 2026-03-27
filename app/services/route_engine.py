@@ -135,6 +135,40 @@ class RouteEngine:
 
         return self._build_result(best_goal, distances[best_goal], parents)
 
+    def find_route_through_stations(self, station_ids: list[str]) -> RouteResult:
+        if len(station_ids) < 2:
+            raise ValueError("At least two station ids are required")
+
+        normalized_station_ids: list[str] = []
+        for station_id in station_ids:
+            if station_id not in self.network.stations:
+                raise ValueError(f"Unknown station: {station_id}")
+            if normalized_station_ids and station_id == normalized_station_ids[-1]:
+                continue
+            normalized_station_ids.append(station_id)
+
+        if len(normalized_station_ids) == 1:
+            station_id = normalized_station_ids[0]
+            return RouteResult(
+                total_time_sec=0,
+                walking_time_sec=0,
+                transfer_count=0,
+                stop_count=0,
+                station_ids=[station_id],
+                line_sequence=[],
+                steps=[],
+            )
+
+        legs: list[RouteResult] = []
+        for start_station_id, end_station_id in zip(
+            normalized_station_ids,
+            normalized_station_ids[1:],
+            strict=False,
+        ):
+            legs.append(self.find_route(start_station_id, end_station_id))
+
+        return self._merge_leg_results(legs)
+
     def find_best_route_for_points(
         self,
         start_x: float,
@@ -146,7 +180,13 @@ class RouteEngine:
         max_station_walk_sec: int | None = 60,
         start_preferred_line_ids: list[str] | None = None,
         end_preferred_line_ids: list[str] | None = None,
+        via_station_ids: list[str] | None = None,
     ) -> dict:
+        ordered_via_station_ids = list(via_station_ids or [])
+        for via_station_id in ordered_via_station_ids:
+            if via_station_id not in self.network.stations:
+                raise ValueError(f"Unknown via station: {via_station_id}")
+
         start_candidates = self._candidate_stations(
             start_x,
             start_y,
@@ -172,7 +212,9 @@ class RouteEngine:
         for start_station_id, start_distance in start_candidates:
             for end_station_id, end_distance in end_candidates:
                 try:
-                    route = self.find_route(start_station_id, end_station_id)
+                    route = self.find_route_through_stations(
+                        [start_station_id, *ordered_via_station_ids, end_station_id]
+                    )
                 except ValueError:
                     continue
 
@@ -198,6 +240,10 @@ class RouteEngine:
                         "end_point": {"x": end_x, "y": end_y},
                         "selected_start_station": self._station_payload(start_station_id),
                         "selected_end_station": self._station_payload(end_station_id),
+                        "via_stations": [
+                            self._station_payload(station_id)
+                            for station_id in ordered_via_station_ids
+                        ],
                         "access_walk_distance_px": round(start_distance, 2),
                         "egress_walk_distance_px": round(end_distance, 2),
                         "access_walk_time_sec": access_time_sec,
@@ -210,6 +256,45 @@ class RouteEngine:
             raise ValueError("No route found for the selected points")
 
         return best_result
+
+    @staticmethod
+    def _merge_leg_results(legs: list[RouteResult]) -> RouteResult:
+        if not legs:
+            raise ValueError("No route legs to merge")
+
+        total_time_sec = 0
+        walking_time_sec = 0
+        transfer_count = 0
+        stop_count = 0
+        station_ids: list[str] = []
+        line_sequence: list[str] = []
+        steps: list[RouteStep] = []
+
+        for index, leg in enumerate(legs):
+            total_time_sec += leg.total_time_sec
+            walking_time_sec += leg.walking_time_sec
+            transfer_count += leg.transfer_count
+            stop_count += leg.stop_count
+            steps.extend(leg.steps)
+
+            if index == 0:
+                station_ids.extend(leg.station_ids)
+            else:
+                station_ids.extend(leg.station_ids[1:])
+
+            for line_id in leg.line_sequence:
+                if not line_sequence or line_sequence[-1] != line_id:
+                    line_sequence.append(line_id)
+
+        return RouteResult(
+            total_time_sec=total_time_sec,
+            walking_time_sec=walking_time_sec,
+            transfer_count=transfer_count,
+            stop_count=stop_count,
+            station_ids=station_ids,
+            line_sequence=line_sequence,
+            steps=steps,
+        )
 
     @staticmethod
     def _add_cost(left: Cost, right: Cost) -> Cost:

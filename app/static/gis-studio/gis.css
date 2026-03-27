@@ -1,0 +1,45 @@
+.gis-workspace {
+  grid-template-columns: 340px minmax(0, 1fr);
+  grid-template-areas: "control map";
+}
+
+.gis-sidebar {
+  max-height: calc(100vh - 170px);
+  overflow: auto;
+}
+
+.gis-map-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.gis-map {
+  width: 100%;
+  min-height: 72vh;
+  border-radius: 18px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  overflow: hidden;
+}
+
+.gis-map .maplibregl-popup-content {
+  font-family: "Manrope", sans-serif;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.2);
+}
+
+@media (max-width: 1180px) {
+  .gis-workspace {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "control"
+      "map";
+  }
+
+  .gis-sidebar {
+    max-height: none;
+  }
+
+  .gis-map {
+    min-height: 62vh;
+  }
+}

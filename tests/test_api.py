@@ -14,9 +14,12 @@ from app.api.routes import BuilderNetworkSaveRequest
 from app.api.routes import BuilderStationLinePayload
 from app.api.routes import BuilderStationPayload
 from app.api.routes import CalibrationSaveRequest
+from app.api.routes import GisPointRouteRequest
 from app.api.routes import PointRouteRequest
 from app.api.routes import RouteRequest
 from app.api.routes import get_builder_network
+from app.api.routes import get_gis_route_for_points
+from app.api.routes import get_gis_network
 from app.api.routes import get_network
 from app.api.routes import get_route_for_points
 from app.api.routes import get_route
@@ -44,6 +47,34 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body["map"]["supports_line_hints"])
         self.assertEqual(body["diagram"]["svg_url"], "/map/diagram/taipei_mrt_interactive.svg")
         self.assertTrue(body["diagram"]["is_vector"])
+
+    async def test_gis_network_endpoint_returns_geojson_payload(self):
+        body = await get_gis_network()
+
+        self.assertIn("source", body)
+        self.assertIn("bounds", body)
+        self.assertIn("stations", body)
+        self.assertIn("lines", body)
+        self.assertEqual(body["stations"]["type"], "FeatureCollection")
+        self.assertEqual(body["lines"]["type"], "FeatureCollection")
+        self.assertGreaterEqual(len(body["stations"]["features"]), 150)
+
+    async def test_gis_route_points_endpoint_returns_station_route(self):
+        body = await get_gis_route_for_points(
+            GisPointRouteRequest(
+                start_lon=121.5010,
+                start_lat=25.0420,
+                end_lon=121.5515,
+                end_lat=25.0238,
+                walking_m_per_sec=1.3,
+            )
+        )
+
+        self.assertIn("selected_start_station", body)
+        self.assertIn("selected_end_station", body)
+        self.assertIn("route", body)
+        self.assertGreaterEqual(body["total_journey_time_sec"], body["route"]["total_time_sec"])
+        self.assertGreater(len(body["route"]["station_ids"]), 1)
 
     async def test_builder_network_endpoint_returns_raw_station_lines(self):
         body = await get_builder_network()
@@ -98,6 +129,51 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["selected_end_station"]["id"], end_station["id"])
         self.assertEqual(body["route"]["station_ids"][0], start_station["id"])
         self.assertEqual(body["route"]["station_ids"][-1], end_station["id"])
+
+    async def test_point_route_endpoint_passes_via_stations_to_engine(self):
+        network_payload = await get_network()
+        station_ids = [station["id"] for station in network_payload["stations"][:3]]
+        start_station_id, via_station_id, end_station_id = station_ids
+        captured: dict = {}
+
+        class DummyEngine:
+            def find_best_route_for_points(self, **kwargs):
+                captured.update(kwargs)
+                return {
+                    "start_point": {"x": 0, "y": 0},
+                    "end_point": {"x": 1, "y": 1},
+                    "selected_start_station": {"id": start_station_id, "name": "", "x": 0, "y": 0, "line_ids": []},
+                    "selected_end_station": {"id": end_station_id, "name": "", "x": 0, "y": 0, "line_ids": []},
+                    "via_stations": [{"id": via_station_id, "name": "", "x": 0, "y": 0, "line_ids": []}],
+                    "access_walk_distance_px": 0,
+                    "egress_walk_distance_px": 0,
+                    "access_walk_time_sec": 0,
+                    "egress_walk_time_sec": 0,
+                    "total_journey_time_sec": 0,
+                    "route": {
+                        "total_time_sec": 0,
+                        "walking_time_sec": 0,
+                        "transfer_count": 0,
+                        "stop_count": 0,
+                        "station_ids": [start_station_id, via_station_id, end_station_id],
+                        "line_sequence": [],
+                        "steps": [],
+                    },
+                }
+
+        with patch("app.api.routes.get_route_engine", return_value=DummyEngine()):
+            body = await get_route_for_points(
+                PointRouteRequest(
+                    start_x=0,
+                    start_y=0,
+                    end_x=1,
+                    end_y=1,
+                    via_station_ids=[via_station_id],
+                )
+            )
+
+        self.assertEqual(captured["via_station_ids"], [via_station_id])
+        self.assertEqual(body["route"]["station_ids"], [start_station_id, via_station_id, end_station_id])
 
     async def test_save_calibration_calls_store_and_refreshes_cache(self):
         request = CalibrationSaveRequest(

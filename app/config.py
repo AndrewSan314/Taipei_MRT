@@ -52,6 +52,13 @@ class Settings:
     point_route_max_station_walk_sec: int = int(
         os.getenv("SUBWAY_POINT_ROUTE_MAX_WALK_SEC", "60")
     )
+    qgis_geojson_dir: Path = Path(
+        os.getenv("SUBWAY_QGIS_GEOJSON_DIR", str(PROJECT_ROOT / "app" / "data" / "gis"))
+    )
+    fallback_min_lon: float = float(os.getenv("SUBWAY_FALLBACK_MIN_LON", "121.36"))
+    fallback_min_lat: float = float(os.getenv("SUBWAY_FALLBACK_MIN_LAT", "24.90"))
+    fallback_max_lon: float = float(os.getenv("SUBWAY_FALLBACK_MAX_LON", "121.72"))
+    fallback_max_lat: float = float(os.getenv("SUBWAY_FALLBACK_MAX_LAT", "25.24"))
 
 
 def get_settings() -> Settings:
