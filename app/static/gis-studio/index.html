@@ -64,6 +64,21 @@
           </section>
 
           <section>
+            <h2>Station Editor</h2>
+            <div class="actions">
+              <button id="toggleEditBtn" class="secondary" type="button">Enable Edit</button>
+              <button id="deleteStationBtn" class="secondary" type="button">Delete Node</button>
+              <button id="saveStationsBtn" class="primary" type="button">Save GeoJSON</button>
+              <button id="reloadStationsBtn" class="secondary" type="button">Reload GeoJSON</button>
+            </div>
+            <div id="editorCard" class="summary empty">Editor off. Enable edit mode to move stations.</div>
+            <p class="gis-hint">
+              Edit mode: click a station to select it, drag it, or click the map to reposition. Save to
+              write changes back to <code>stations.geojson</code>.
+            </p>
+          </section>
+
+          <section>
             <h2>Route Summary</h2>
             <div id="summaryCard" class="summary empty">No route yet.</div>
           </section>
@@ -87,6 +102,6 @@
     </div>
 
     <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-    <script src="/static/gis-studio/gis.js?v=20260327-gis-4"></script>
+    <script src="/static/gis-studio/gis.js?v=20260328-gis-15"></script>
   </body>
 </html>

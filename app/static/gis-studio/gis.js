@@ -2,6 +2,7 @@ const state = {
   network: null,
   gis: null,
   map: null,
+  focusBounds: null,
   pickMode: "start",
   startPoint: null,
   endPoint: null,
@@ -11,6 +12,12 @@ const state = {
   stationById: new Map(),
   lineById: new Map(),
   suppressNextMapClick: false,
+  stationEditMode: false,
+  editableStationId: null,
+  dirtyStationIds: new Set(),
+  isDraggingStation: false,
+  stationDragMoveHandler: null,
+  stationDragUpHandler: null,
 };
 
 const elements = {
@@ -21,8 +28,13 @@ const elements = {
   clearViaBtn: document.getElementById("clearViaBtn"),
   findRouteBtn: document.getElementById("findRouteBtn"),
   resetBtn: document.getElementById("resetBtn"),
+  toggleEditBtn: document.getElementById("toggleEditBtn"),
+  deleteStationBtn: document.getElementById("deleteStationBtn"),
+  saveStationsBtn: document.getElementById("saveStationsBtn"),
+  reloadStationsBtn: document.getElementById("reloadStationsBtn"),
   statusText: document.getElementById("statusText"),
   selectionCard: document.getElementById("selectionCard"),
+  editorCard: document.getElementById("editorCard"),
   summaryCard: document.getElementById("summaryCard"),
   stepsList: document.getElementById("stepsList"),
 };
@@ -102,10 +114,263 @@ function bindEvents() {
   elements.clearViaBtn.addEventListener("click", clearViaStations);
   elements.findRouteBtn.addEventListener("click", findRouteForPoints);
   elements.resetBtn.addEventListener("click", resetAll);
+  elements.toggleEditBtn.addEventListener("click", toggleStationEditMode);
+  elements.deleteStationBtn.addEventListener("click", deleteEditableStation);
+  elements.saveStationsBtn.addEventListener("click", saveEditedStations);
+  elements.reloadStationsBtn.addEventListener("click", reloadGisStations);
+}
+
+function isValidBounds(bounds) {
+  return (
+    Array.isArray(bounds) &&
+    bounds.length === 4 &&
+    bounds.every((value) => Number.isFinite(Number(value))) &&
+    Number(bounds[0]) < Number(bounds[2]) &&
+    Number(bounds[1]) < Number(bounds[3])
+  );
+}
+
+function expandBounds(bounds, padding) {
+  return [
+    bounds[0] - padding,
+    bounds[1] - padding,
+    bounds[2] + padding,
+    bounds[3] + padding,
+  ];
+}
+
+function shrinkBounds(bounds, ratioX, ratioY) {
+  if (!isValidBounds(bounds)) {
+    return bounds;
+  }
+
+  const longitudeInset = (bounds[2] - bounds[0]) * ratioX;
+  const latitudeInset = (bounds[3] - bounds[1]) * ratioY;
+  const shrunk = [
+    bounds[0] + longitudeInset,
+    bounds[1] + latitudeInset,
+    bounds[2] - longitudeInset,
+    bounds[3] - latitudeInset,
+  ];
+  return isValidBounds(shrunk) ? shrunk : bounds;
+}
+
+function clampBounds(bounds, clampTo) {
+  if (!isValidBounds(bounds) || !isValidBounds(clampTo)) {
+    return bounds;
+  }
+
+  const clamped = [
+    Math.max(bounds[0], clampTo[0]),
+    Math.max(bounds[1], clampTo[1]),
+    Math.min(bounds[2], clampTo[2]),
+    Math.min(bounds[3], clampTo[3]),
+  ];
+  return isValidBounds(clamped) ? clamped : bounds;
+}
+
+function getPercentile(sortedValues, percentile) {
+  if (!Array.isArray(sortedValues) || !sortedValues.length) {
+    return null;
+  }
+
+  const scaledIndex = Math.min(Math.max(percentile, 0), 1) * (sortedValues.length - 1);
+  const lowerIndex = Math.floor(scaledIndex);
+  const upperIndex = Math.ceil(scaledIndex);
+  if (lowerIndex === upperIndex) {
+    return sortedValues[lowerIndex];
+  }
+
+  const ratio = scaledIndex - lowerIndex;
+  return sortedValues[lowerIndex] * (1 - ratio) + sortedValues[upperIndex] * ratio;
+}
+
+function getStationCoordinates() {
+  return (state.gis?.stations?.features || [])
+    .filter((feature) => !isDeletedStationFeature(feature))
+    .map((feature) => feature?.geometry?.coordinates)
+    .filter(
+      (point) =>
+        Array.isArray(point) &&
+        point.length >= 2 &&
+        Number.isFinite(Number(point[0])) &&
+        Number.isFinite(Number(point[1])),
+    )
+    .map((point) => [Number(point[0]), Number(point[1])]);
+}
+
+function getStationCoordinateBounds() {
+  const coordinates = getStationCoordinates();
+  if (!coordinates.length) {
+    return null;
+  }
+
+  const longitudes = coordinates.map(([lon]) => lon);
+  const latitudes = coordinates.map(([, lat]) => lat);
+  return [
+    Math.min(...longitudes),
+    Math.min(...latitudes),
+    Math.max(...longitudes),
+    Math.max(...latitudes),
+  ];
+}
+
+function isPointWithinBounds(point, bounds) {
+  return (
+    Array.isArray(point) &&
+    point.length >= 2 &&
+    isValidBounds(bounds) &&
+    Number(point[0]) >= bounds[0] &&
+    Number(point[0]) <= bounds[2] &&
+    Number(point[1]) >= bounds[1] &&
+    Number(point[1]) <= bounds[3]
+  );
+}
+
+function filterPointFeaturesToBounds(featureCollection, bounds) {
+  if (!featureCollection?.features || !isValidBounds(bounds)) {
+    return featureCollection;
+  }
+
+  return {
+    ...featureCollection,
+    features: featureCollection.features.filter(
+      (feature) =>
+        !isDeletedStationFeature(feature) &&
+        isPointWithinBounds(feature?.geometry?.coordinates, bounds),
+    ),
+  };
+}
+
+function getInteractiveBounds() {
+  const dataBounds = isValidBounds(state.gis?.bounds)
+    ? expandBounds(state.gis.bounds.map(Number), 0.008)
+    : expandBounds(getStationCoordinateBounds() || [121.45, 24.95, 121.65, 25.15], 0.008);
+  const basemapBounds = isValidBounds(state.gis?.basemap?.bounds)
+    ? state.gis.basemap.bounds.map(Number)
+    : null;
+
+  if (dataBounds && basemapBounds) {
+    return clampBounds(dataBounds, basemapBounds);
+  }
+  return dataBounds || basemapBounds || [121.45, 24.95, 121.65, 25.15];
+}
+
+function getCurrentViewportBounds() {
+  if (!state.map) {
+    return null;
+  }
+
+  const bounds = state.map.getBounds();
+  if (!bounds) {
+    return null;
+  }
+  return [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()];
+}
+
+function getSourceBounds() {
+  const basemapBounds = isValidBounds(state.gis?.basemap?.bounds)
+    ? state.gis.basemap.bounds.map(Number)
+    : null;
+  return basemapBounds || getInteractiveBounds();
+}
+
+function getFocusBounds() {
+  const coordinates = getStationCoordinates();
+  if (coordinates.length < 12) {
+    return getInteractiveBounds();
+  }
+
+  const longitudes = coordinates.map(([lon]) => lon).sort((left, right) => left - right);
+  const latitudes = coordinates.map(([, lat]) => lat).sort((left, right) => left - right);
+  const focusBounds = [
+    getPercentile(longitudes, 0.11) - 0.0075,
+    getPercentile(latitudes, 0.11) - 0.0075,
+    getPercentile(longitudes, 0.91) + 0.013,
+    getPercentile(latitudes, 0.91) + 0.013,
+  ];
+
+  return clampBounds(focusBounds, getInteractiveBounds());
+}
+
+function getStationViewportBounds() {
+  const focusBounds = state.focusBounds || getFocusBounds();
+  const viewportBounds = getCurrentViewportBounds();
+  const baseBounds =
+    isValidBounds(viewportBounds) && isValidBounds(focusBounds)
+      ? clampBounds(viewportBounds, focusBounds)
+      : viewportBounds || focusBounds;
+  return shrinkBounds(baseBounds, 0.035, 0.06);
+}
+
+function getEnvelopeMinZoom(bounds) {
+  if (!state.map || !isValidBounds(bounds)) {
+    return 13.25;
+  }
+
+  const fitCamera = state.map.cameraForBounds(
+    [
+      [bounds[0], bounds[1]],
+      [bounds[2], bounds[3]],
+    ],
+    {
+      padding: { top: 20, right: 20, bottom: 20, left: 20 },
+      maxZoom: 22,
+    },
+  );
+  const container = state.map.getContainer();
+  const aspectRatio =
+    container && container.clientWidth > 0 && container.clientHeight > 0
+      ? container.clientWidth / container.clientHeight
+      : 1;
+  const zoomBias = aspectRatio >= 1.55 ? 0.14 : aspectRatio >= 1.35 ? 0.08 : 0.04;
+  return Math.min((fitCamera?.zoom || 12.95) + zoomBias, 14.4);
+}
+
+function getDefaultViewportCamera(bounds, minZoom) {
+  if (!isValidBounds(bounds)) {
+    return {
+      center: [121.54, 25.05],
+      zoom: minZoom || 13.25,
+      bearing: 0,
+      pitch: 0,
+    };
+  }
+
+  const container = state.map.getContainer();
+  const aspectRatio =
+    container && container.clientWidth > 0 && container.clientHeight > 0
+      ? container.clientWidth / container.clientHeight
+      : 1;
+  const center = [
+    (bounds[0] + bounds[2]) / 2 + (aspectRatio >= 1.45 ? 0.0012 : 0.0005),
+    (bounds[1] + bounds[3]) / 2 + (aspectRatio >= 1.45 ? 0.0046 : 0.0025),
+  ];
+
+  return {
+    center,
+    zoom: minZoom,
+    bearing: 0,
+    pitch: 0,
+  };
+}
+
+function refreshVisibleStationsSource() {
+  const source = state.map?.getSource(SOURCE_IDS.stations);
+  if (!source) {
+    return;
+  }
+
+  const visibleStations = filterPointFeaturesToBounds(
+    state.gis.stations,
+    getStationViewportBounds(),
+  );
+  source.setData(visibleStations);
 }
 
 function buildBasemapSource() {
   const basemap = state.gis?.basemap;
+  const sourceBounds = getSourceBounds();
   if (basemap?.enabled && basemap.tiles_url) {
     return {
       type: "raster",
@@ -114,6 +379,7 @@ function buildBasemapSource() {
       minzoom: Number(basemap.minzoom || 0),
       maxzoom: Number(basemap.maxzoom || 22),
       attribution: basemap.name || "Local MBTiles",
+      bounds: sourceBounds,
     };
   }
 
@@ -122,6 +388,7 @@ function buildBasemapSource() {
     tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
     tileSize: 256,
     attribution: "(c) OpenStreetMap contributors",
+    bounds: sourceBounds,
   };
 }
 
@@ -160,13 +427,15 @@ function initializeMap() {
 }
 
 function handleMapLoad() {
+  const focusBounds = getFocusBounds();
+  state.focusBounds = focusBounds;
   state.map.addSource(SOURCE_IDS.lines, {
     type: "geojson",
     data: state.gis.lines,
   });
   state.map.addSource(SOURCE_IDS.stations, {
     type: "geojson",
-    data: state.gis.stations,
+    data: filterPointFeaturesToBounds(state.gis.stations, focusBounds),
   });
   state.map.addSource(SOURCE_IDS.pickedPoints, {
     type: "geojson",
@@ -285,6 +554,8 @@ function handleMapLoad() {
         "#2ca56d",
         "end_station",
         "#dd5a4f",
+        "edit_station",
+        "#145ef2",
         "#e6a91a",
       ],
       "circle-stroke-color": "#0f172a",
@@ -314,6 +585,8 @@ function handleMapLoad() {
         "#14532d",
         "end_station",
         "#7f1d1d",
+        "edit_station",
+        "#1d4ed8",
         "#7a4d00",
       ],
       "text-halo-color": "#ffffff",
@@ -372,6 +645,7 @@ function handleMapLoad() {
       "text-size": ["interpolate", ["linear"], ["zoom"], 11.8, 10, 14, 13.5],
       "text-offset": [0.75, -0.65],
       "text-anchor": "left",
+      "symbol-avoid-edges": true,
       "text-allow-overlap": true,
       "text-ignore-placement": false,
     },
@@ -384,16 +658,30 @@ function handleMapLoad() {
   });
 
   state.map.on("mouseenter", "metro-stations-circle", () => {
-    state.map.getCanvas().style.cursor = "pointer";
+    state.map.getCanvas().style.cursor = state.stationEditMode ? "grab" : "pointer";
   });
   state.map.on("mouseleave", "metro-stations-circle", () => {
-    state.map.getCanvas().style.cursor = "";
+    if (!state.isDraggingStation) {
+      state.map.getCanvas().style.cursor = "";
+    }
+  });
+  state.map.on("mousedown", "metro-stations-circle", (event) => {
+    if (!state.stationEditMode) {
+      return;
+    }
+    startStationDrag(event);
   });
 
   state.map.on("click", "metro-stations-circle", (event) => {
     const feature = event.features?.[0];
     const stationId = feature?.properties?.id;
     if (!stationId) {
+      return;
+    }
+
+    if (state.stationEditMode) {
+      selectEditableStation(stationId);
+      state.suppressNextMapClick = true;
       return;
     }
 
@@ -426,6 +714,21 @@ function handleMapLoad() {
       state.suppressNextMapClick = false;
       return;
     }
+    if (state.stationEditMode) {
+      if (!state.editableStationId) {
+        setStatus("Station edit mode: click a station first, then drag it or click the map to reposition.");
+        return;
+      }
+      updateEditableStationCoordinate(
+        state.editableStationId,
+        [roundTo7(event.lngLat.lng), roundTo7(event.lngLat.lat)],
+        { markDirty: true },
+      );
+      setStatus(
+        `Moved ${formatStation(state.editableStationId)}. Save GeoJSON to persist the new position.`,
+      );
+      return;
+    }
     if (state.pickMode === "via") {
       setStatus("Via mode: click on a station to add/remove stopover.");
       return;
@@ -448,18 +751,15 @@ function handleMapLoad() {
     setStatus("Point updated. Click Find Route to calculate.");
   });
 
-  const bounds = state.gis.basemap?.bounds || state.gis.bounds || [121.45, 24.95, 121.65, 25.15];
-  state.map.fitBounds(
-    [
-      [bounds[0], bounds[1]],
-      [bounds[2], bounds[3]],
-    ],
-    { padding: 40, duration: 0 },
-  );
+  const minZoom = getEnvelopeMinZoom(focusBounds);
+  state.map.setMinZoom(minZoom);
+  state.map.jumpTo(getDefaultViewportCamera(focusBounds, minZoom));
   state.map.setMaxBounds([
-    [bounds[0] - 0.04, bounds[1] - 0.04],
-    [bounds[2] + 0.04, bounds[3] + 0.04],
+    [focusBounds[0] - 0.0035, focusBounds[1] - 0.0035],
+    [focusBounds[2] + 0.01, focusBounds[3] + 0.01],
   ]);
+  refreshVisibleStationsSource();
+  state.map.on("moveend", refreshVisibleStationsSource);
 
   updatePickedPointsSource();
   updateSelectedStationsSource();
@@ -471,13 +771,11 @@ function setPickMode(mode) {
   elements.pickStartBtn.classList.toggle("active", mode === "start");
   elements.pickEndBtn.classList.toggle("active", mode === "end");
   elements.pickViaBtn.classList.toggle("active", mode === "via");
-  setStatus(
-    mode === "start"
-      ? "Click anywhere on map to set START point."
-      : mode === "end"
-        ? "Click anywhere on map to set END point."
-        : "Via mode: click station circles to add/remove stopovers.",
-  );
+  if (state.stationEditMode) {
+    setStatus("Station edit mode is active. Save or reload edits before returning to route picking.");
+    return;
+  }
+  setStatus(getPickModeStatus(mode));
 }
 
 function toggleViaStation(stationId) {
@@ -499,6 +797,233 @@ function clearViaStations() {
   updateRouteSource(emptyFeatureCollection());
   renderAll();
   setStatus("VIA stations cleared.");
+}
+
+function toggleStationEditMode() {
+  if (state.stationEditMode && state.dirtyStationIds.size) {
+    setStatus("Save GeoJSON or reload GIS stations before leaving edit mode.");
+    return;
+  }
+  setStationEditMode(!state.stationEditMode);
+}
+
+function setStationEditMode(enabled) {
+  state.stationEditMode = enabled;
+  if (!enabled) {
+    stopStationDrag();
+    state.editableStationId = null;
+  }
+  updateSelectedStationsSource();
+  renderAll();
+  setStatus(
+    enabled
+      ? "Station edit mode enabled. Click a station to select it, drag it, or click the map to reposition."
+      : getPickModeStatus(state.pickMode),
+  );
+}
+
+function startStationDrag(event) {
+  const feature = event.features?.[0];
+  const stationId = feature?.properties?.id;
+  if (!stationId || !state.map) {
+    return;
+  }
+
+  selectEditableStation(stationId);
+  stopStationDrag();
+  state.suppressNextMapClick = true;
+  state.isDraggingStation = false;
+  state.map.dragPan.disable();
+  state.map.getCanvas().style.cursor = "grabbing";
+
+  state.stationDragMoveHandler = (moveEvent) => {
+    state.isDraggingStation = true;
+    updateEditableStationCoordinate(
+      stationId,
+      [roundTo7(moveEvent.lngLat.lng), roundTo7(moveEvent.lngLat.lat)],
+      { markDirty: true },
+    );
+  };
+  state.stationDragUpHandler = () => {
+    const moved = state.isDraggingStation;
+    stopStationDrag();
+    setStatus(
+      moved
+        ? `Moved ${formatStation(stationId)}. Save GeoJSON to persist the new position.`
+        : `Selected ${formatStation(stationId)} for editing.`,
+    );
+  };
+
+  state.map.on("mousemove", state.stationDragMoveHandler);
+  state.map.on("mouseup", state.stationDragUpHandler);
+}
+
+function stopStationDrag() {
+  if (!state.map) {
+    return;
+  }
+  if (state.stationDragMoveHandler) {
+    state.map.off("mousemove", state.stationDragMoveHandler);
+    state.stationDragMoveHandler = null;
+  }
+  if (state.stationDragUpHandler) {
+    state.map.off("mouseup", state.stationDragUpHandler);
+    state.stationDragUpHandler = null;
+  }
+  if (state.map.dragPan) {
+    state.map.dragPan.enable();
+  }
+  state.isDraggingStation = false;
+  state.map.getCanvas().style.cursor = state.stationEditMode ? "grab" : "";
+}
+
+function selectEditableStation(stationId) {
+  state.editableStationId = stationId;
+  updateSelectedStationsSource();
+  renderAll();
+}
+
+function updateEditableStationCoordinate(stationId, coordinates, options = {}) {
+  const feature = getStationGeoJsonFeature(stationId);
+  if (!feature) {
+    setStatus(`Station ${stationId} is not available in GIS GeoJSON.`);
+    return;
+  }
+
+  const nextCoordinates = [roundTo7(coordinates[0]), roundTo7(coordinates[1])];
+  feature.geometry = {
+    ...feature.geometry,
+    type: "Point",
+    coordinates: nextCoordinates,
+  };
+  state.stationCoordsById.set(stationId, nextCoordinates);
+  if (options.markDirty) {
+    state.dirtyStationIds.add(stationId);
+  }
+  if (state.routeResult) {
+    state.routeResult = null;
+    updateRouteSource(emptyFeatureCollection());
+  }
+  refreshVisibleStationsSource();
+  updateSelectedStationsSource();
+  renderAll();
+}
+
+async function saveEditedStations() {
+  if (!state.dirtyStationIds.size) {
+    setStatus("No edited GIS stations to save.");
+    return;
+  }
+
+  const stations = Array.from(state.dirtyStationIds).map((stationId) => {
+    const feature = getStationGeoJsonFeature(stationId);
+    const coordinates = state.stationCoordsById.get(stationId) || [null, null];
+    return {
+      id: stationId,
+      lon: coordinates[0],
+      lat: coordinates[1],
+      deleted: Boolean(feature?.properties?.deleted),
+    };
+  });
+
+  try {
+    setStatus("Saving edited GIS stations...");
+    const response = await fetch("/api/gis/stations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stations }),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      throw new Error(body.detail || "Unable to save GIS stations.");
+    }
+    state.dirtyStationIds.clear();
+    renderAll();
+    setStatus(
+      `Saved ${body.updated_count} GIS station${body.updated_count === 1 ? "" : "s"} to stations.geojson.`,
+    );
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Unable to save GIS stations.");
+  }
+}
+
+async function deleteEditableStation() {
+  if (!state.stationEditMode) {
+    setStatus("Enable station edit mode first.");
+    return;
+  }
+  if (!state.editableStationId) {
+    setStatus("Select a station first, then delete it.");
+    return;
+  }
+
+  const stationId = state.editableStationId;
+  const stationLabel = formatStation(stationId);
+  if (!window.confirm(`Delete ${stationLabel} from GIS station nodes?`)) {
+    return;
+  }
+
+  try {
+    setStatus(`Deleting ${stationLabel}...`);
+    const response = await fetch(`/api/gis/stations/${encodeURIComponent(stationId)}`, {
+      method: "DELETE",
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      throw new Error(body.detail || "Unable to delete GIS station.");
+    }
+
+    const feature = getStationGeoJsonFeature(stationId);
+    if (feature) {
+      feature.properties = {
+        ...(feature.properties || {}),
+        deleted: true,
+      };
+    }
+    state.dirtyStationIds.delete(stationId);
+    state.editableStationId = null;
+    state.viaStationIds = state.viaStationIds.filter((viaStationId) => viaStationId !== stationId);
+    state.routeResult = null;
+    refreshVisibleStationsSource();
+    updateSelectedStationsSource();
+    updateRouteSource(emptyFeatureCollection());
+    renderAll();
+    setStatus(`Deleted ${stationLabel} from GIS station nodes.`);
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || `Unable to delete ${stationLabel}.`);
+  } finally {
+    stopStationDrag();
+  }
+}
+
+async function reloadGisStations() {
+  try {
+    setStatus("Reloading GIS stations from GeoJSON...");
+    const response = await fetch("/api/gis/network");
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.detail || "Unable to reload GIS stations.");
+    }
+    state.gis = payload;
+    state.routeResult = null;
+    state.dirtyStationIds.clear();
+    if (state.editableStationId && !payload.stations?.features?.some((feature) => feature?.properties?.id === state.editableStationId)) {
+      state.editableStationId = null;
+    }
+    buildStationCoordinateLookup();
+    state.map?.getSource(SOURCE_IDS.lines)?.setData(state.gis.lines);
+    refreshVisibleStationsSource();
+    updatePickedPointsSource();
+    updateSelectedStationsSource();
+    updateRouteSource(emptyFeatureCollection());
+    renderAll();
+    setStatus("GIS stations reloaded from GeoJSON.");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Unable to reload GIS stations.");
+  }
 }
 
 async function findRouteForPoints() {
@@ -669,6 +1194,9 @@ function updateSelectedStationsSource() {
   }
 
   const features = [];
+  if (state.stationEditMode && state.editableStationId) {
+    features.push(buildStationFeature(state.editableStationId, "edit_station"));
+  }
   if (state.routeResult?.selected_start_station?.id) {
     features.push(buildStationFeature(state.routeResult.selected_start_station.id, "start_station"));
   }
@@ -705,6 +1233,16 @@ function buildStationFeature(stationId, role) {
   };
 }
 
+function getStationGeoJsonFeature(stationId) {
+  return (state.gis?.stations?.features || []).find(
+    (feature) => feature?.properties?.id === stationId,
+  ) || null;
+}
+
+function isDeletedStationFeature(feature) {
+  return Boolean(feature?.properties?.deleted);
+}
+
 function updateRouteSource(featureCollection) {
   const source = state.map?.getSource(SOURCE_IDS.route);
   if (!source) {
@@ -715,8 +1253,10 @@ function updateRouteSource(featureCollection) {
 
 function renderAll() {
   renderSelectionCard();
+  renderEditorCard();
   renderSummary();
   renderSteps();
+  syncEditorControls();
 }
 
 function renderSelectionCard() {
@@ -785,6 +1325,33 @@ function renderSummary() {
       `${Math.round((state.routeResult.access_walk_distance_m || 0) + (state.routeResult.egress_walk_distance_m || 0))} m`,
     ),
     renderMetricCard("Line Sequence", lineLabels),
+  ].join("");
+}
+
+function renderEditorCard() {
+  const dirtyCount = state.dirtyStationIds.size;
+  const selectedStationId = state.editableStationId;
+  const selectedCoordinates = selectedStationId ? state.stationCoordsById.get(selectedStationId) : null;
+
+  if (!state.stationEditMode && !dirtyCount) {
+    elements.editorCard.classList.add("empty");
+    elements.editorCard.textContent = "Editor off. Enable edit mode to move stations.";
+    return;
+  }
+
+  elements.editorCard.classList.remove("empty");
+  if (!selectedStationId || !selectedCoordinates) {
+    elements.editorCard.innerHTML = [
+      renderMetricCard("Editor", state.stationEditMode ? "Enabled" : "Disabled"),
+      renderMetricCard("Unsaved", String(dirtyCount)),
+    ].join("");
+    return;
+  }
+
+  elements.editorCard.innerHTML = [
+    renderMetricCard("Editing", formatStation(selectedStationId)),
+    renderMetricCard("Lon / Lat", `${selectedCoordinates[0].toFixed(6)}, ${selectedCoordinates[1].toFixed(6)}`),
+    renderMetricCard("Unsaved", String(dirtyCount)),
   ].join("");
 }
 
@@ -920,6 +1487,21 @@ function resetAll() {
   setStatus("Selection reset.");
 }
 
+function syncEditorControls() {
+  elements.toggleEditBtn.textContent = state.stationEditMode ? "Disable Edit" : "Enable Edit";
+  elements.saveStationsBtn.disabled = state.dirtyStationIds.size === 0;
+  elements.deleteStationBtn.disabled = !state.stationEditMode || !state.editableStationId;
+  [
+    elements.pickStartBtn,
+    elements.pickEndBtn,
+    elements.pickViaBtn,
+    elements.clearViaBtn,
+    elements.findRouteBtn,
+  ].forEach((element) => {
+    element.disabled = state.stationEditMode;
+  });
+}
+
 function formatStation(stationId) {
   if (!stationId) {
     return "N/A";
@@ -933,6 +1515,14 @@ function formatStation(stationId) {
 
 function formatLonLat(point) {
   return `${point.lon.toFixed(5)}, ${point.lat.toFixed(5)}`;
+}
+
+function getPickModeStatus(mode) {
+  return mode === "start"
+    ? "Click anywhere on map to set START point."
+    : mode === "end"
+      ? "Click anywhere on map to set END point."
+      : "Via mode: click station circles to add/remove stopovers.";
 }
 
 function formatDuration(totalSec) {
@@ -956,6 +1546,10 @@ function escapeHtml(value) {
 
 function roundTo6(value) {
   return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function roundTo7(value) {
+  return Math.round(value * 10_000_000) / 10_000_000;
 }
 
 function emptyFeatureCollection() {

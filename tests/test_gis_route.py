@@ -9,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.services import walk_network as walk_network_module
 from app.services.gis_route import build_walk_graph
+from app.services.gis_route import extract_station_coordinates
 from app.services.gis_route import find_nearest_station_by_walk
 
 
@@ -17,6 +18,26 @@ def _feature_collection(features):
 
 
 class GisWalkRoutingTests(unittest.TestCase):
+    def test_extract_station_coordinates_ignores_deleted_station_features(self):
+        stations_geojson = _feature_collection(
+            [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [121.5, 25.05]},
+                    "properties": {"id": "station-a", "name": "Station A"},
+                },
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [121.6, 25.06]},
+                    "properties": {"id": "station-b", "name": "Station B", "deleted": True},
+                },
+            ]
+        )
+
+        lookup = extract_station_coordinates(stations_geojson)
+
+        self.assertEqual(lookup, {"station-a": (121.5, 25.05)})
+
     def test_walk_graph_nearest_node_returns_exact_match_without_distance_scan(self):
         walk_network = _feature_collection(
             [

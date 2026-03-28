@@ -10,7 +10,10 @@ from app.services.walk_network import find_nearest_station_by_walk
 def extract_station_coordinates(stations_geojson: dict[str, Any]) -> dict[str, tuple[float, float]]:
     lookup: dict[str, tuple[float, float]] = {}
     for feature in stations_geojson.get("features", []):
-        station_id = feature.get("properties", {}).get("id")
+        properties = feature.get("properties", {})
+        if properties.get("deleted"):
+            continue
+        station_id = properties.get("id")
         coordinates = feature.get("geometry", {}).get("coordinates")
         if (
             not station_id

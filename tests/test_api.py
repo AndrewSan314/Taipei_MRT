@@ -1,5 +1,8 @@
+import json
 import sys
+import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +18,8 @@ from app.api.routes import BuilderStationLinePayload
 from app.api.routes import BuilderStationPayload
 from app.api.routes import CalibrationSaveRequest
 from app.api.routes import GisPointRouteRequest
+from app.api.routes import GisStationPositionPayload
+from app.api.routes import GisStationSaveRequest
 from app.api.routes import PointRouteRequest
 from app.api.routes import RouteRequest
 from app.api.routes import get_builder_network
@@ -23,8 +28,11 @@ from app.api.routes import get_gis_network
 from app.api.routes import get_network
 from app.api.routes import get_route_for_points
 from app.api.routes import get_route
+from app.api.routes import delete_gis_station
+from app.api.routes import save_gis_stations
 from app.api.routes import save_builder_network
 from app.api.routes import save_calibration
+from app.config import get_settings
 from app.domain.models import Line
 from app.domain.models import RouteResult
 from app.domain.models import RouteStep
@@ -55,6 +63,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_gis_network_endpoint_returns_geojson_payload(self):
         body = await get_gis_network()
+        station_ids = {
+            feature.get("properties", {}).get("id")
+            for feature in body["stations"]["features"]
+        }
 
         self.assertIn("source", body)
         self.assertIn("bounds", body)
@@ -64,7 +76,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("walk_network", body)
         self.assertEqual(body["stations"]["type"], "FeatureCollection")
         self.assertEqual(body["lines"]["type"], "FeatureCollection")
-        self.assertGreaterEqual(len(body["stations"]["features"]), 150)
+        self.assertEqual(body["source"], "qgis_geojson_partial")
+        self.assertGreaterEqual(len(body["stations"]["features"]), 100)
+        self.assertNotIn("taoyuan-sports-park", station_ids)
 
     async def test_gis_route_points_endpoint_returns_station_route(self):
         body = await get_gis_route_for_points(
@@ -306,6 +320,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             body["ride_path_features"][0]["geometry"]["coordinates"],
             [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
         )
+        self.assertEqual(
+            body["ride_path_features"][0]["properties"].get("line_color"),
+            "#ff0000",
+        )
 
     async def test_builder_network_endpoint_returns_raw_station_lines(self):
         body = await get_builder_network()
@@ -470,6 +488,138 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(context.exception.status_code, 400)
         self.assertIn("Unknown station_id", context.exception.detail)
+
+    async def test_save_gis_stations_updates_station_geojson_coordinates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gis_dir = Path(tmpdir)
+            stations_path = gis_dir / "stations.geojson"
+            stations_path.write_text(
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "geometry": {"type": "Point", "coordinates": [121.5, 25.0]},
+                                "properties": {"id": "station-a", "name": "Station A"},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            request = GisStationSaveRequest(
+                stations=[
+                    GisStationPositionPayload(id="station-a", lon=121.5123456, lat=25.0123456),
+                ]
+            )
+            patched_settings = replace(get_settings(), qgis_geojson_dir=gis_dir)
+
+            with patch("app.api.routes.settings", patched_settings):
+                body = await save_gis_stations(request)
+
+            self.assertEqual(body["updated_count"], 1)
+            saved_payload = json.loads(stations_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                saved_payload["features"][0]["geometry"]["coordinates"],
+                [121.5123456, 25.0123456],
+            )
+
+    async def test_save_gis_stations_rejects_unknown_station_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gis_dir = Path(tmpdir)
+            stations_path = gis_dir / "stations.geojson"
+            stations_path.write_text(
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "geometry": {"type": "Point", "coordinates": [121.5, 25.0]},
+                                "properties": {"id": "station-a", "name": "Station A"},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            request = GisStationSaveRequest(
+                stations=[
+                    GisStationPositionPayload(id="station-missing", lon=121.6, lat=25.1),
+                ]
+            )
+            patched_settings = replace(get_settings(), qgis_geojson_dir=gis_dir)
+
+            with (
+                patch("app.api.routes.settings", patched_settings),
+                self.assertRaises(HTTPException) as context,
+            ):
+                await save_gis_stations(request)
+
+            self.assertEqual(context.exception.status_code, 400)
+            self.assertIn("Unknown GIS station id", context.exception.detail)
+
+    async def test_save_gis_stations_marks_station_deleted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gis_dir = Path(tmpdir)
+            stations_path = gis_dir / "stations.geojson"
+            stations_path.write_text(
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "geometry": {"type": "Point", "coordinates": [121.5, 25.0]},
+                                "properties": {"id": "station-a", "name": "Station A"},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            request = GisStationSaveRequest(
+                stations=[
+                    GisStationPositionPayload(id="station-a", lon=121.5, lat=25.0, deleted=True),
+                ]
+            )
+            patched_settings = replace(get_settings(), qgis_geojson_dir=gis_dir)
+
+            with patch("app.api.routes.settings", patched_settings):
+                body = await save_gis_stations(request)
+
+            self.assertEqual(body["updated_count"], 1)
+            saved_payload = json.loads(stations_path.read_text(encoding="utf-8"))
+            self.assertTrue(saved_payload["features"][0]["properties"]["deleted"])
+
+    async def test_delete_gis_station_marks_station_deleted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gis_dir = Path(tmpdir)
+            stations_path = gis_dir / "stations.geojson"
+            stations_path.write_text(
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "geometry": {"type": "Point", "coordinates": [121.5, 25.0]},
+                                "properties": {"id": "station-a", "name": "Station A"},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            patched_settings = replace(get_settings(), qgis_geojson_dir=gis_dir)
+
+            with patch("app.api.routes.settings", patched_settings):
+                body = await delete_gis_station("station-a")
+
+            self.assertEqual(body["updated_count"], 1)
+            saved_payload = json.loads(stations_path.read_text(encoding="utf-8"))
+            self.assertTrue(saved_payload["features"][0]["properties"]["deleted"])
 
 
 if __name__ == "__main__":

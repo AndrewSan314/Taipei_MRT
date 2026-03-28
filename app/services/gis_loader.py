@@ -18,6 +18,7 @@ def build_gis_payload(
     fallback_bounds: tuple[float, float, float, float],
     include_station_access_points: bool = True,
     include_walk_network: bool = True,
+    merge_missing_stations: bool = True,
 ) -> dict[str, Any]:
     stations_path = qgis_geojson_dir / "stations.geojson"
     lines_path = qgis_geojson_dir / "lines.geojson"
@@ -40,17 +41,25 @@ def build_gis_payload(
         fallback_bounds,
     )
 
+    qgis_stations_are_complete = _is_valid_station_geojson(qgis_stations, network)
+
     if _is_valid_geojson(qgis_stations):
-        stations_geojson = _merge_station_geojson(
-            qgis_stations,
-            fallback_stations_geojson,
-            network,
+        stations_geojson = (
+            _merge_station_geojson(
+                qgis_stations,
+                fallback_stations_geojson,
+                network,
+            )
+            if merge_missing_stations
+            else qgis_stations
         )
         lines_geojson = qgis_lines if _is_valid_geojson(qgis_lines) else fallback_lines_geojson
         source = (
             "qgis_geojson"
-            if _is_valid_station_geojson(qgis_stations, network) and _is_valid_geojson(qgis_lines)
+            if qgis_stations_are_complete and _is_valid_geojson(qgis_lines)
             else "qgis_geojson_merged"
+            if merge_missing_stations
+            else "qgis_geojson_partial"
         )
     else:
         source = "fallback_projected"
