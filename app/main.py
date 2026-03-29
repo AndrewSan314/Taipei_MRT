@@ -39,3 +39,13 @@ async def builder():
 @app.get("/gis")
 async def gis():
     return FileResponse(Path(settings.static_dir) / "gis-studio" / "index.html")
+
+
+@app.get("/login")
+async def login():
+    return FileResponse(Path(settings.static_dir) / "login" / "index.html")
+
+
+@app.get("/admin")
+async def admin():
+    return FileResponse(Path(settings.static_dir) / "admin" / "index.html")

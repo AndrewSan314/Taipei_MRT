@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MRT Admin Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Manrope:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+    />
+    <link rel="stylesheet" href="/static/shared/app-shell.css?v=20260326-stopovers-1" />
+    <link rel="stylesheet" href="/static/admin/admin.css?v=20260329-admin-3" />
+  </head>
+  <body class="admin-shell">
+    <div class="shell admin-page">
+      <header class="admin-hero">
+        <div class="admin-hero__copy">
+          <p class="eyebrow">Operations Console / Network Scenario Studio</p>
+          <h1>MRT Admin Studio</h1>
+          <p class="lede">
+            Mô phỏng các tình huống vận hành trực tiếp trên bản đồ mạng: vùng mưa, đoạn ùn tắc
+            và danh sách ga bị chặn. Trang này hiện chỉ thao tác phía frontend, phù hợp cho demo
+            điều phối và lên rule tạm thời.
+          </p>
+        </div>
+
+        <div class="admin-hero__meta">
+          <article class="hero-stat hero-stat--accent">
+            <span class="stat-label">Data Source</span>
+            <strong id="networkSourceLabel">Loading...</strong>
+            <span class="stat-meta">Synced from `/api/network` + `/api/gis/network`</span>
+          </article>
+          <article class="hero-stat">
+            <span class="stat-label">Current Mode</span>
+            <strong id="modeLabel">Rain Zone</strong>
+            <span class="stat-meta" id="modeHint">Create an affected area with 2 map clicks</span>
+          </article>
+          <article class="hero-stat">
+            <span class="stat-label">Session Rules</span>
+            <strong id="totalRuleCount">0</strong>
+            <span class="stat-meta">No changes in this browser session yet</span>
+          </article>
+        </div>
+      </header>
+
+      <main class="admin-workspace">
+        <aside class="panel admin-sidebar">
+          <section class="admin-section">
+            <div class="section-heading">
+              <h2>Scenario Tools</h2>
+              <span class="section-chip">Live</span>
+            </div>
+            <div class="mode-grid admin-mode-grid">
+              <button id="modeRain" class="secondary mode-btn active" type="button">
+                Rain Zone
+              </button>
+              <button id="modeBlock" class="secondary mode-btn" type="button">
+                Block Segment
+              </button>
+            </div>
+            <div class="actions admin-actions">
+              <button id="clearAll" class="secondary" type="button">Clear All Rules</button>
+              <button id="exportRules" class="primary" type="button">Export JSON</button>
+            </div>
+            <p class="hint">
+              Click on the GIS map to place points. Rain zone uses 2 clicks. Block segment uses
+              1 or 2 clicks and still supports a single blocked point.
+            </p>
+          </section>
+
+          <section class="admin-section">
+            <div class="section-heading">
+              <h2>Network Snapshot</h2>
+              <span class="section-chip section-chip--soft">Read only</span>
+            </div>
+            <div id="networkStats" class="metric-grid">
+              <article class="metric-card">
+                <span>Lines</span>
+                <strong id="lineCount">0</strong>
+              </article>
+              <article class="metric-card">
+                <span>Stations</span>
+                <strong id="stationCount">0</strong>
+              </article>
+              <article class="metric-card">
+                <span>Segments</span>
+                <strong id="segmentCount">0</strong>
+              </article>
+              <article class="metric-card">
+                <span>Banned</span>
+                <strong id="bannedCount">0</strong>
+              </article>
+            </div>
+          </section>
+
+          <section class="admin-section">
+            <div class="section-heading">
+              <h2>Banned Stations</h2>
+              <span class="section-chip">Multi select</span>
+            </div>
+            <select id="bannedStations" class="control-select station-select" multiple size="10"></select>
+            <p class="hint">Hold `Ctrl` or `Cmd` to select multiple stations.</p>
+          </section>
+
+          <section class="admin-section">
+            <div class="section-heading">
+              <h2>Session Feed</h2>
+              <span class="section-chip section-chip--soft">Auto update</span>
+            </div>
+            <div id="activityFeed" class="activity-feed">
+              <article class="feed-item empty-feed">
+                <strong>No actions yet</strong>
+                <span>Add the first rule to start the session log.</span>
+              </article>
+            </div>
+          </section>
+        </aside>
+
+        <section class="panel admin-map-panel">
+          <div class="map-panel__header">
+            <div>
+              <p class="eyebrow">Interactive Control Surface</p>
+              <h2>Operation Map</h2>
+            </div>
+            <div class="map-legend">
+              <span><i class="legend-dot legend-dot--rain"></i>Rain zone</span>
+              <span><i class="legend-dot legend-dot--block"></i>Block segment</span>
+              <span><i class="legend-dot legend-dot--station"></i>Banned station</span>
+            </div>
+          </div>
+
+          <div class="map-stage-card">
+            <div class="map-stage-card__status">
+              <span class="pill-label">Status</span>
+              <strong id="statusText">Loading GIS network...</strong>
+            </div>
+            <div class="map-shell">
+              <div class="map-toolbar">
+                <span class="pill">MapLibre GIS</span>
+                <div class="zoom-controls">
+                  <button id="zoomInBtn" class="zoom-btn" type="button">+</button>
+                  <button id="zoomOutBtn" class="zoom-btn" type="button">-</button>
+                  <button id="zoomResetBtn" class="zoom-btn zoom-reset" type="button">Reset</button>
+                </div>
+              </div>
+              <div
+                class="map-surface admin-map-surface admin-map-canvas"
+                id="adminMap"
+                aria-label="MRT admin GIS map"
+              ></div>
+              <div id="mapHelper" class="map-helper">
+                Click map to create rules. Zoom and pan are available at all times.
+              </div>
+            </div>
+            <p class="map-caption">
+              `/admin` in `main.py` still serves one static page, but the map layer now uses the
+              same GIS foundation as `gis-studio` with zoom and pan support.
+            </p>
+          </div>
+        </section>
+
+        <aside class="panel admin-detail-panel">
+          <section class="admin-section">
+            <div class="section-heading">
+              <h2>Rule Summary</h2>
+              <span class="section-chip">Computed</span>
+            </div>
+            <div id="ruleCards" class="rule-card-grid">
+              <article class="rule-card">
+                <span>Rain zones</span>
+                <strong id="rainCount">0</strong>
+                <p>No affected areas defined.</p>
+              </article>
+              <article class="rule-card">
+                <span>Block segments</span>
+                <strong id="blockCount">0</strong>
+                <p>No blocked segments defined.</p>
+              </article>
+              <article class="rule-card">
+                <span>Banned stations</span>
+                <strong id="selectedBannedCount">0</strong>
+                <p>The current list is empty.</p>
+              </article>
+            </div>
+          </section>
+
+          <section class="admin-section">
+            <div class="section-heading">
+              <h2>Generated Payload</h2>
+              <span class="section-chip section-chip--soft">Preview</span>
+            </div>
+            <pre id="rulesSummary" class="rules-preview">No rain zone, block segment, or banned station yet.</pre>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <script src="/static/admin/admin.js?v=20260329-admin-3"></script>
+  </body>
+</html>

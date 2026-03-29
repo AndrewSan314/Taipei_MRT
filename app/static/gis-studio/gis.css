@@ -78,6 +78,19 @@ body.gis-page {
   font-size: 1.5rem;
 }
 
+.back-login-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: #145ef2;
+  font: 700 0.92rem "Manrope", sans-serif;
+  text-decoration: none;
+}
+
+.back-login-link:hover,
+.back-login-link:focus-visible {
+  text-decoration: underline;
+}
+
 .sidebar-toggle-btn,
 .open-sidebar-btn {
   width: auto;
