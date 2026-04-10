@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Taipei GIS Route Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Manrope:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+    />
+    <link rel="stylesheet" href="/static/shared/app-shell.css?v=20260327-gis-1" />
+    <link rel="stylesheet" href="/static/gis-studio/gis.css?v=20260329-gis-11" />
+  </head>
+  <body class="gis-page">
+    <div class="gis-shell">
+      <aside class="gis-sidebar">
+        <div class="gis-sidebar-header">
+          <div>
+            <p class="eyebrow">GIS / MapLibre + QGIS</p>
+            <h1 class="gis-title">Taipei Route Navigator</h1>
+            <a class="back-login-link" href="/login">back to login page</a>
+          </div>
+          <button id="toggleSidebarBtn" class="secondary sidebar-toggle-btn" type="button">Hide</button>
+        </div>
+
+        <section>
+          <p class="hint">Chon diem dau/cuoi truc tiep tren map de tim duong di.</p>
+          <div class="status-strip">
+            <span class="stat-label">Data Source</span>
+            <strong id="gisSourceBadge">Loading...</strong>
+            <span class="stat-meta">/api/gis/network</span>
+          </div>
+        </section>
+
+        <section>
+          <h2>Pick Mode</h2>
+          <div class="mode-grid">
+            <button id="pickStartBtn" class="secondary mode-btn active" type="button">Pick Start Point</button>
+            <button id="pickEndBtn" class="secondary mode-btn" type="button">Pick End Point</button>
+          </div>
+          <div class="actions">
+            <button id="pickViaBtn" class="secondary" type="button">Pick VIA Station</button>
+            <button id="clearViaBtn" class="secondary" type="button">Clear Via</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Selection</h2>
+          <div id="selectionCard" class="summary empty">Click anywhere on map for start/end points.</div>
+        </section>
+
+        <section>
+          <h2>Actions</h2>
+          <div class="actions">
+            <button id="findRouteBtn" class="primary" type="button">Find Route</button>
+            <button id="resetBtn" class="secondary" type="button">Reset</button>
+          </div>
+          <p id="statusText" class="status">Loading GIS network...</p>
+        </section>
+
+        <section>
+          <h2>Route Summary</h2>
+          <div id="summaryCard" class="summary empty">No route yet.</div>
+        </section>
+
+        <section>
+          <h2>Route Steps</h2>
+          <ol id="stepsList" class="steps">
+            <li class="empty">Pick start and end points, then calculate route.</li>
+          </ol>
+        </section>
+      </aside>
+
+      <section class="gis-map-panel">
+        <button id="openSidebarBtn" class="secondary open-sidebar-btn" type="button">Menu</button>
+        <div id="gisMap" class="gis-map" role="img" aria-label="Taipei GIS route map"></div>
+      </section>
+    </div>
+
+    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <script src="/static/gis-studio/gis.js?v=20260328-gis-10"></script>
+  </body>
+</html>

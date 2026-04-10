@@ -1,0 +1,157 @@
+.calibrate-workspace {
+  grid-template-columns: 340px minmax(0, 1fr);
+}
+
+.calibrate-panel {
+  max-height: calc(100vh - 180px);
+  overflow: auto;
+}
+
+.calibrate-frame {
+  min-height: 760px;
+}
+
+#calibrationMap {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.station-list {
+  display: grid;
+  gap: 10px;
+}
+
+.station-row {
+  width: 100%;
+  text-align: left;
+  background: rgba(15, 23, 42, 0.03);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  color: var(--text);
+  padding: 12px 14px;
+}
+
+.station-row.active {
+  background: var(--accent-soft);
+  border-color: rgba(244, 185, 66, 0.42);
+}
+
+.station-row small {
+  display: block;
+  color: var(--muted);
+  margin-top: 5px;
+}
+
+.active-station-title {
+  margin-bottom: 8px;
+}
+
+.nudge-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.nudge-grid button {
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--text);
+}
+
+.overlay-controls {
+  display: grid;
+  gap: 12px;
+}
+
+.overlay-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(15, 23, 42, 0.03);
+}
+
+.overlay-toggle input {
+  width: auto;
+}
+
+.overlay-field {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.overlay-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.overlay-field input[type="number"] {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  background: rgba(15, 23, 42, 0.03);
+  color: var(--text);
+  padding: 10px 12px;
+  font: inherit;
+}
+
+.overlay-field input[type="range"] {
+  width: 100%;
+  margin: 0;
+}
+
+.overlay-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.cal-guide-overlay {
+  pointer-events: none;
+}
+
+.cal-marker-label {
+  fill: var(--text);
+  font-size: 30px;
+  font-weight: 700;
+}
+
+.cal-station-halo {
+  fill: rgba(15, 23, 42, 0.08);
+  stroke: rgba(15, 23, 42, 0.24);
+  stroke-width: 8;
+}
+
+.cal-station-core {
+  fill: rgba(15, 23, 42, 0.86);
+  stroke: #ffffff;
+  stroke-width: 8;
+}
+
+.cal-station-core.active {
+  fill: var(--accent);
+  stroke: #11131a;
+}
+
+.cal-crosshair {
+  stroke: rgba(244, 185, 66, 0.88);
+  stroke-width: 6;
+  stroke-linecap: round;
+}
+
+@media (max-width: 1180px) {
+  .calibrate-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .overlay-grid {
+    grid-template-columns: 1fr;
+  }
+}

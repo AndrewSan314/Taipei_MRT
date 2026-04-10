@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Subway Node Calibration</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Manrope:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/shared/app-shell.css?v=20260316-equal-map-width-1" />
+    <link rel="stylesheet" href="/static/calibration/calibrate.css?v=20260316-overlay-guide-2" />
+  </head>
+  <body>
+    <div class="shell calibrate-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Calibration / Node Editor</p>
+          <h1>Map Node Calibration</h1>
+          <p class="lede">
+            Chọn ga ở danh sách bên trái, click đúng vị trí trên ảnh map, sau đó lưu lại để cập nhật
+            trực tiếp `station_positions_taipei_vector_map_2022.json`.
+          </p>
+        </div>
+        <div class="hero-card">
+          <span class="stat-label">Workflow</span>
+          <strong>Select → Click → Nudge → Save</strong>
+          <span class="stat-meta">tọa độ được ghi thẳng vào data file</span>
+        </div>
+      </header>
+
+      <main class="workspace calibrate-workspace">
+        <aside class="panel calibrate-panel">
+          <section>
+            <h2>Stations</h2>
+            <div class="actions">
+              <button id="saveBtn" class="primary">Save All</button>
+              <button id="resetBtn" class="secondary">Reload</button>
+            </div>
+            <p id="statusText" class="status">Đang nạp dữ liệu…</p>
+          </section>
+
+          <section>
+            <h2>Active Station</h2>
+            <div id="activeStationCard" class="summary empty">Chưa chọn ga nào.</div>
+            <div class="nudge-grid">
+              <button data-dx="0" data-dy="-5">↑ 5</button>
+              <button data-dx="-5" data-dy="0">← 5</button>
+              <button data-dx="5" data-dy="0">→ 5</button>
+              <button data-dx="0" data-dy="5">↓ 5</button>
+            </div>
+          </section>
+
+          <section>
+            <h2>Overlay Guide</h2>
+            <div class="overlay-controls">
+              <label class="overlay-toggle">
+                <span>Show geographical overlay</span>
+                <input id="overlayEnabled" type="checkbox" checked />
+              </label>
+
+              <label class="overlay-field">
+                <div class="overlay-field-head">
+                  <span>Opacity</span>
+                  <output id="overlayOpacityValue" for="overlayOpacity">42%</output>
+                </div>
+                <input id="overlayOpacity" type="range" min="0" max="100" value="42" />
+              </label>
+
+              <div class="overlay-grid">
+                <label class="overlay-field">
+                  <span>Scale</span>
+                  <input id="overlayScale" type="number" min="0.10" max="3.00" step="0.01" />
+                </label>
+
+                <label class="overlay-field">
+                  <span>Offset X</span>
+                  <input id="overlayOffsetX" type="number" step="1" />
+                </label>
+
+                <label class="overlay-field">
+                  <span>Offset Y</span>
+                  <input id="overlayOffsetY" type="number" step="1" />
+                </label>
+              </div>
+
+              <div class="actions">
+                <button id="overlayFitBtn" class="secondary" type="button">Fit Overlay</button>
+                <button id="overlayResetBtn" class="secondary" type="button">Reset Overlay</button>
+              </div>
+
+              <p class="hint">
+                Guide layer only. It stays semi-transparent and does not affect saved station
+                coordinates until you click on the map.
+              </p>
+            </div>
+          </section>
+
+          <section>
+            <h2>Station List</h2>
+            <div id="stationList" class="station-list"></div>
+          </section>
+        </aside>
+
+        <section class="panel map-panel">
+          <div class="map-frame calibrate-frame">
+            <svg id="calibrationMap" role="img" aria-label="Calibration map"></svg>
+          </div>
+          <p class="map-caption">
+            Click lên ảnh để đặt lại tọa độ của ga đang chọn. Marker vàng là ga active.
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/calibration/calibrate_overlay.js?v=20260316-overlay-guide-2"></script>
+    <script src="/static/calibration/calibrate.js?v=20260316-overlay-guide-2"></script>
+  </body>
+</html>

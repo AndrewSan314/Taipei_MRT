@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Login</title>
+    <link rel="stylesheet" href="/static/shared/app-shell.css?v=20260326-stopovers-1" />
+    <link rel="stylesheet" href="/static/login/login.css?v=20260329-login-1" />
+  </head>
+  <body class="login-page">
+    <div class="login-card">
+      <h1>Đăng nhập</h1>
+      <p class="lead">Đăng nhập để vào bảng điều khiển MRT admin.</p>
+
+      <form id="loginForm" class="login-form" action="/admin" method="get" onsubmit="return false;">
+        <label for="username">Tên đăng nhập</label>
+        <input id="username" name="username" type="text" required autocomplete="username" />
+
+        <label for="password">Mật khẩu</label>
+        <input id="password" name="password" type="password" required autocomplete="current-password" />
+
+        <button id="loginButton" type="submit" class="primary">Đăng nhập</button>
+      </form>
+
+      <p class="hint">
+        Mẫu: admin / password. Chỉ demo UI, không xác thực thật.
+      </p>
+    </div>
+
+    <script>
+      document.getElementById('loginForm').addEventListener('submit', function () {
+        const user = document.getElementById('username').value.trim();
+        const pass = document.getElementById('password').value.trim();
+        if (!user || !pass) {
+          alert('Vui lòng điền đầy đủ.');
+          return false;
+        }
+        window.location.href = '/admin';
+        return false;
+      });
+    </script>
+  </body>
+</html>

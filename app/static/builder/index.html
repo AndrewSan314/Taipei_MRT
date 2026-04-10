@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Subway Graph Builder</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Manrope:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/shared/app-shell.css?v=20260313-builder-native-2" />
+    <link rel="stylesheet" href="/static/builder/builder.css?v=20260313-builder-native-2" />
+  </head>
+  <body>
+    <div class="shell builder-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Graph Builder / Subway Diagram</p>
+          <h1>Rebuild Subway Graph</h1>
+          <p class="lede">
+            Dùng chính subway diagram để rebuild graph từ đầu. Tạo station, tạo line, sắp thứ tự
+            station trên từng line, rồi lưu lại thành source of truth mới cho app.
+          </p>
+        </div>
+        <div class="hero-card">
+          <span class="stat-label">Workflow</span>
+          <strong>Line -> Station -> Order -> Save</strong>
+          <span class="stat-meta">diagram coordinates are stored as dedicated overlay positions</span>
+        </div>
+      </header>
+
+      <main class="workspace builder-workspace">
+        <aside class="panel builder-sidebar">
+          <section>
+            <h2>Actions</h2>
+            <div class="actions">
+              <button id="saveNetworkBtn" class="primary" type="button">Save Network</button>
+              <button id="reloadBuilderBtn" class="secondary" type="button">Reload</button>
+            </div>
+            <div class="actions">
+              <button id="startBlankBtn" class="secondary" type="button">Start Blank</button>
+            </div>
+            <p id="builderStatusText" class="status">Loading builder data...</p>
+          </section>
+
+          <section>
+            <h2>Create Line</h2>
+            <div class="builder-form">
+              <label for="lineIdInput">Line ID</label>
+              <input id="lineIdInput" type="text" placeholder="blue" />
+              <label for="lineNameInput">Line Name</label>
+              <input id="lineNameInput" type="text" placeholder="Blue Line" />
+              <label for="lineColorInput">Line Color</label>
+              <input id="lineColorInput" type="color" value="#3d6df2" />
+              <button id="addLineBtn" class="secondary" type="button">Add Line</button>
+            </div>
+            <div id="lineList" class="builder-list"></div>
+          </section>
+
+          <section>
+            <h2>Create Station</h2>
+            <div class="builder-form">
+              <label for="stationIdInput">Station ID</label>
+              <input id="stationIdInput" type="text" placeholder="BL12" />
+              <label for="stationNameInput">Station Name</label>
+              <input id="stationNameInput" type="text" placeholder="Taipei Main Station" />
+              <button id="addStationBtn" class="secondary" type="button">Add Station</button>
+              <button id="deleteStationBtn" class="secondary" type="button">Delete Active Station</button>
+            </div>
+            <div id="activeStationCard" class="summary empty">No active station.</div>
+            <div id="stationList" class="builder-list"></div>
+          </section>
+
+          <section>
+            <h2>Active Line Order</h2>
+            <div id="activeLineCard" class="summary empty">No active line.</div>
+            <div class="actions builder-order-actions">
+              <button id="appendStationBtn" class="secondary" type="button">Append Active Station</button>
+              <button id="removeLineStationBtn" class="secondary" type="button">Remove Selected</button>
+            </div>
+            <div class="actions builder-order-actions">
+              <button id="moveLineStationUpBtn" class="secondary" type="button">Move Up</button>
+              <button id="moveLineStationDownBtn" class="secondary" type="button">Move Down</button>
+            </div>
+            <div id="lineOrderList" class="builder-list"></div>
+          </section>
+        </aside>
+
+        <section class="panel map-panel">
+          <div class="map-card builder-map-card">
+            <div class="map-toolbar">
+              <h2>Subway Diagram Placement</h2>
+              <div class="toolbar-actions">
+                <span class="pill">Click to place active station</span>
+                <div class="zoom-controls" aria-label="Builder zoom controls">
+                  <button id="builderZoomOutBtn" class="zoom-btn" type="button" aria-label="Zoom out">-</button>
+                  <button id="builderZoomInBtn" class="zoom-btn" type="button" aria-label="Zoom in">+</button>
+                  <button id="builderZoomResetBtn" class="zoom-btn zoom-reset" type="button">Reset</button>
+                </div>
+              </div>
+            </div>
+            <div id="builderDiagramSurface" class="map-surface builder-surface">
+              <div id="builderDiagramStage" class="map-stage builder-stage">
+                <div id="builderDiagramDocument" class="builder-diagram-document" aria-label="Subway diagram builder surface"></div>
+                <svg id="builderDiagramOverlay" class="map-overlay is-interactive" role="img"></svg>
+              </div>
+            </div>
+            <p class="map-caption">
+              Chọn một station ở sidebar rồi click lên diagram để đặt `diagram_x / diagram_y`.
+            </p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/builder/builder_zoom.js?v=20260313-builder-native-2"></script>
+    <script src="/static/builder/builder.js?v=20260313-builder-native-2"></script>
+  </body>
+</html>
