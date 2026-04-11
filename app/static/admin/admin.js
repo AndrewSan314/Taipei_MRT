@@ -52,7 +52,10 @@ const elements = {
   bannedStations: document.getElementById('bannedStations'),
   rulesSummary: document.getElementById('rulesSummary'),
   activityFeed: document.getElementById('activityFeed'),
+  activeRulesList: document.getElementById('activeRulesList'),
   mapHelper: document.getElementById('mapHelper'),
+  toggleInspector: document.getElementById('toggleInspector'),
+  inspectorPanel: document.getElementById('inspectorPanel'),
 };
 
 async function init() {
@@ -116,6 +119,7 @@ function applyScenarioPayload(payload) {
   state.rainZones = Array.isArray(payload?.rain_zones)
     ? payload.rain_zones
         .map((zone) => ({
+          id: zone.id || `rain-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
           center: {
             lon: Number(zone.center?.lon),
             lat: Number(zone.center?.lat),
@@ -128,6 +132,7 @@ function applyScenarioPayload(payload) {
   state.blockSegments = Array.isArray(payload?.block_segments)
     ? payload.block_segments
         .map((segment) => ({
+          id: segment.id || `block-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
           kind: segment.kind === 'point' ? 'point' : 'line',
           from: {
             lon: Number(segment.from?.lon),
@@ -166,7 +171,8 @@ async function saveScenarioState() {
     if (!response.ok) {
       throw new Error(responsePayload?.detail || 'Failed to save admin scenarios.');
     }
-    applyScenarioPayload(responsePayload?.scenarios || payload);
+    // No longer overwriting state with payload from server to avoid race conditions during rapid drawing.
+    // The local state is the source of truth; the server just persists it.
     renderMetrics();
     updateRulesSummary();
   } catch (error) {
@@ -254,6 +260,10 @@ function bindEvents() {
   elements.bannedStations.addEventListener('change', () => {
     const selected = Array.from(elements.bannedStations.selectedOptions).map((option) => option.value);
     setBannedStations(selected);
+  });
+  elements.activeRulesList?.addEventListener('click', handleActiveRuleAction);
+  elements.toggleInspector?.addEventListener('click', () => {
+    elements.inspectorPanel?.classList.toggle('collapsed');
   });
   window.addEventListener('resize', () => state.map?.resize());
 }
@@ -716,6 +726,7 @@ async function handleMapClick(point) {
 async function addRainZone(centerPoint, edgePoint) {
   const radiusM = haversineDistanceM(centerPoint.lat, centerPoint.lon, edgePoint.lat, edgePoint.lon);
   state.rainZones.push({
+    id: `rain-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
     center: centerPoint,
     radius_m: Math.max(30, Math.round(radiusM)),
   });
@@ -731,6 +742,7 @@ async function addRainZone(centerPoint, edgePoint) {
 
 async function addBlockSegment(fromPoint, toPoint) {
   state.blockSegments.push({
+    id: `block-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
     kind: 'line',
     from: fromPoint,
     to: toPoint,
@@ -747,6 +759,7 @@ async function addBlockSegment(fromPoint, toPoint) {
 
 async function addBlockPoint(point) {
   state.blockSegments.push({
+    id: `block-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
     kind: 'point',
     from: point,
     to: point,
@@ -786,8 +799,140 @@ async function resetAll() {
 function render() {
   renderMetrics();
   updateRulesSummary();
+  renderActiveRules();
   updateMapSources();
   updateMapHelper();
+}
+
+function renderActiveRules() {
+  if (!elements.activeRulesList) {
+    return;
+  }
+
+  const items = [];
+
+  state.rainZones.forEach((zone, index) => {
+    items.push(`
+      <article class="active-rule">
+        <div class="active-rule__body">
+          <span class="active-rule__tag active-rule__tag--rain">Rain</span>
+          <strong class="active-rule__title">Rain zone ${index + 1}</strong>
+          <span class="active-rule__meta">${escapeHtml(formatLonLat(zone.center))} · radius ${Math.round(zone.radius_m)} m</span>
+        </div>
+        <button
+          class="active-rule__remove"
+          type="button"
+          data-action="remove-rain"
+          data-id="${zone.id}"
+          aria-label="Remove rain zone ${index + 1}"
+        >
+          ×
+        </button>
+      </article>
+    `);
+  });
+
+  state.blockSegments.forEach((segment, index) => {
+    const detail =
+      segment.kind === 'point'
+        ? `${formatLonLat(segment.from)}`
+        : `${formatLonLat(segment.from)} -> ${formatLonLat(segment.to)}`;
+
+    items.push(`
+      <article class="active-rule">
+        <div class="active-rule__body">
+          <span class="active-rule__tag active-rule__tag--block">${segment.kind === 'point' ? 'Block Point' : 'Block Line'}</span>
+          <strong class="active-rule__title">Blocked ${segment.kind === 'point' ? 'point' : 'segment'} ${index + 1}</strong>
+          <span class="active-rule__meta">${escapeHtml(detail)}</span>
+        </div>
+        <button
+          class="active-rule__remove"
+          type="button"
+          data-action="remove-block"
+          data-id="${segment.id}"
+          aria-label="Remove blocked segment ${index + 1}"
+        >
+          ×
+        </button>
+      </article>
+    `);
+  });
+
+  [...state.bannedStationIds].forEach((stationId) => {
+    const station = state.stationById.get(stationId);
+    items.push(`
+      <article class="active-rule">
+        <div class="active-rule__body">
+          <span class="active-rule__tag active-rule__tag--station">Station</span>
+          <strong class="active-rule__title">${escapeHtml(station?.name || stationId)}</strong>
+          <span class="active-rule__meta">${escapeHtml(stationId)}</span>
+        </div>
+        <button
+          class="active-rule__remove"
+          type="button"
+          data-action="remove-station"
+          data-station-id="${escapeHtml(stationId)}"
+          aria-label="Remove banned station ${escapeHtml(stationId)}"
+        >
+          ×
+        </button>
+      </article>
+    `);
+  });
+
+  if (!items.length) {
+    elements.activeRulesList.innerHTML = `
+      <article class="active-rule active-rule--empty">
+        <strong>No active rules</strong>
+        <span>Add a rain zone, block, or banned station to see it here.</span>
+      </article>
+    `;
+    return;
+  }
+
+  elements.activeRulesList.innerHTML = items.join('');
+}
+
+async function handleActiveRuleAction(event) {
+  const button = event.target.closest('[data-action]');
+  if (!button) {
+    return;
+  }
+
+  const action = button.dataset.action;
+  if (action === 'remove-rain') {
+    const id = button.dataset.id;
+    if (id) {
+      state.rainZones = state.rainZones.filter((z) => z.id !== id);
+      addFeed('Rain zone removed', `Removed rain zone.`);
+      render();
+      await saveScenarioState();
+    }
+    return;
+  }
+
+  if (action === 'remove-block') {
+    const id = button.dataset.id;
+    if (id) {
+      state.blockSegments = state.blockSegments.filter((s) => s.id !== id);
+      addFeed('Blocked segment removed', `Removed blocked segment.`);
+      render();
+      await saveScenarioState();
+    }
+    return;
+  }
+
+  if (action === 'remove-station') {
+    const stationId = button.dataset.stationId;
+    if (!stationId) {
+      return;
+    }
+    state.bannedStationIds.delete(stationId);
+    applyHydratedSelections();
+    addFeed('Banned station removed', `Removed ${stationId} from banned stations.`);
+    render();
+    await saveScenarioState();
+  }
 }
 
 function updateMapSources() {
@@ -836,7 +981,7 @@ function buildBlockFeatureCollection() {
           coordinates: [segment.from.lon, segment.from.lat],
         },
         properties: {
-          id: `block-${index + 1}`,
+          id: segment.id,
           kind: 'point',
         },
       });
@@ -853,7 +998,7 @@ function buildBlockFeatureCollection() {
         ],
       },
       properties: {
-        id: `block-${index + 1}`,
+        id: segment.id,
         kind: 'line',
       },
     });
@@ -915,20 +1060,20 @@ function buildBannedStationFeatureCollection() {
 
 function renderMetrics() {
   const totalRules = state.rainZones.length + state.blockSegments.length + state.bannedStationIds.size;
-  elements.totalRuleCount.textContent = String(totalRules);
-  elements.rainCount.textContent = String(state.rainZones.length);
-  elements.blockCount.textContent = String(state.blockSegments.length);
-  elements.selectedBannedCount.textContent = String(state.bannedStationIds.size);
-  elements.bannedCount.textContent = String(state.bannedStationIds.size);
-  elements.lineCount.textContent = String(state.network?.lines?.length || 0);
-  elements.stationCount.textContent = String(state.network?.stations?.length || 0);
-  elements.segmentCount.textContent = String(state.network?.segments?.length || 0);
+  if (elements.totalRuleCount) elements.totalRuleCount.textContent = String(totalRules);
+  if (elements.rainCount) elements.rainCount.textContent = String(state.rainZones.length);
+  if (elements.blockCount) elements.blockCount.textContent = String(state.blockSegments.length);
+  if (elements.selectedBannedCount) elements.selectedBannedCount.textContent = String(state.bannedStationIds.size);
+  if (elements.bannedCount) elements.bannedCount.textContent = String(state.bannedStationIds.size);
+  if (elements.lineCount) elements.lineCount.textContent = String(state.network?.lines?.length || 0);
+  if (elements.stationCount) elements.stationCount.textContent = String(state.network?.stations?.length || 0);
+  if (elements.segmentCount) elements.segmentCount.textContent = String(state.network?.segments?.length || 0);
 
   const sourceLabel = state.gis?.source?.startsWith('qgis_geojson')
     ? 'QGIS GeoJSON'
     : 'Fallback projection';
   const basemapLabel = state.gis?.basemap?.enabled ? 'MBTiles raster' : 'OSM raster';
-  elements.networkSourceLabel.textContent = `${sourceLabel} + ${basemapLabel}`;
+  if (elements.networkSourceLabel) elements.networkSourceLabel.textContent = `${sourceLabel} + ${basemapLabel}`;
 }
 
 function updateMapHelper() {
@@ -961,7 +1106,7 @@ function buildPayloadPreview() {
       max_lat: roundTo6(state.mapBounds[3]),
     },
     rain_zones: state.rainZones.map((zone, index) => ({
-      id: `rain-${index + 1}`,
+      id: zone.id,
       center: {
         lon: roundTo6(zone.center.lon),
         lat: roundTo6(zone.center.lat),
@@ -970,7 +1115,7 @@ function buildPayloadPreview() {
       radius_m: zone.radius_m,
     })),
     block_segments: state.blockSegments.map((segment, index) => ({
-      id: `block-${index + 1}`,
+      id: segment.id,
       kind: segment.kind,
       from: {
         lon: roundTo6(segment.from.lon),
