@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import pickle
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from app.services.walk_network import haversine_distance_m
@@ -29,18 +32,43 @@ def build_ride_path_features(
     station_coords_by_id: dict[str, Coordinate],
     stations_geojson: dict[str, Any] | None,
     lines_geojson: dict[str, Any] | None,
+    precomputed_segment_index: dict[tuple[str, str, str], list[Coordinate]] | None = None,
+    geojson_line_colors: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
+    explicit_precomputed_segment_index = precomputed_segment_index is not None
+    if precomputed_segment_index is None:
+        if not _is_valid_geojson(lines_geojson):
+            return []
+        all_line_features = lines_geojson.get("features", [])
+        if geojson_line_colors is None:
+            geojson_line_colors = _extract_line_colors_from_geojson(all_line_features)
+        precomputed_segment_index = _build_geojson_segment_index(
+            stations_geojson,
+            lines_geojson,
+        )
+    else:
+        all_line_features = (
+            lines_geojson.get("features", [])
+            if _is_valid_geojson(lines_geojson)
+            else []
+        )
+        if geojson_line_colors is None:
+            geojson_line_colors = _extract_line_colors_from_geojson(all_line_features)
+
+    if explicit_precomputed_segment_index:
+        return _build_ride_path_features_from_precomputed_segments(
+            route_steps=route_steps,
+            station_coords_by_id=station_coords_by_id,
+            precomputed_segment_index=precomputed_segment_index,
+            geojson_line_colors=geojson_line_colors,
+            all_line_features=all_line_features,
+            fallback_to_station_sequence=True,
+        )
+
     if not _is_valid_geojson(lines_geojson):
         return []
 
-    all_line_features = lines_geojson.get("features", [])
-    geojson_line_colors = _extract_line_colors_from_geojson(all_line_features)
-    precomputed_segment_index = _build_geojson_segment_index(
-        stations_geojson,
-        lines_geojson,
-    )
     ride_features: list[dict[str, Any]] = []
-
     for ride_group in _group_contiguous_ride_steps(route_steps):
         line_id = ride_group[0].get("line_id")
         candidate_features: list[dict[str, Any]] = []
@@ -72,6 +100,56 @@ def build_ride_path_features(
             if line_id
             else None
         ) or _extract_first_line_color(candidate_features or _filter_line_features_by_line_id(line_id, all_line_features))
+
+        properties: dict[str, Any] = {"kind": "ride", "line_id": line_id}
+        if line_color:
+            properties["line_color"] = line_color
+
+        ride_features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[lon, lat] for lon, lat in coordinates],
+                },
+                "properties": properties,
+            }
+        )
+
+    return ride_features
+
+
+def _build_ride_path_features_from_precomputed_segments(
+    *,
+    route_steps: list[dict[str, Any]],
+    station_coords_by_id: dict[str, Coordinate],
+    precomputed_segment_index: dict[tuple[str, str, str], list[Coordinate]],
+    geojson_line_colors: dict[str, str],
+    all_line_features: list[dict[str, Any]],
+    fallback_to_station_sequence: bool,
+) -> list[dict[str, Any]]:
+    ride_features: list[dict[str, Any]] = []
+
+    for ride_group in _group_contiguous_ride_steps(route_steps):
+        line_id = ride_group[0].get("line_id")
+        coordinates = _build_precomputed_path_coordinates(
+            ride_group,
+            line_id,
+            precomputed_segment_index,
+        )
+        if not coordinates and fallback_to_station_sequence:
+            coordinates = _build_station_sequence_for_group(
+                ride_group,
+                station_coords_by_id,
+            )
+        if len(coordinates) < 2:
+            continue
+
+        line_color = (
+            geojson_line_colors.get(line_id)
+            if line_id
+            else None
+        ) or _extract_first_line_color(_filter_line_features_by_line_id(line_id, all_line_features))
 
         properties: dict[str, Any] = {"kind": "ride", "line_id": line_id}
         if line_color:
@@ -172,6 +250,22 @@ def _build_geojson_segment_index(
         key: coordinates
         for key, (_, coordinates) in best_segments.items()
     }
+
+
+def load_or_build_geojson_segment_index(
+    stations_geojson: dict[str, Any] | None,
+    lines_geojson: dict[str, Any] | None,
+    cache_dir: Path,
+    signature: str,
+) -> dict[tuple[str, str, str], list[Coordinate]]:
+    cache_path = _geojson_segment_index_cache_path(cache_dir, signature)
+    cached_index = _load_persisted_geojson_segment_index(cache_path, signature)
+    if cached_index is not None:
+        return cached_index
+
+    segment_index = _build_geojson_segment_index(stations_geojson, lines_geojson)
+    _persist_geojson_segment_index(cache_path, signature, segment_index)
+    return segment_index
 
 
 def _build_line_station_snap_entries(
@@ -689,3 +783,43 @@ def _is_valid_geojson(payload: dict[str, Any] | None) -> bool:
         and payload.get("type") == "FeatureCollection"
         and isinstance(payload.get("features"), list)
     )
+
+
+def _geojson_segment_index_cache_path(cache_dir: Path, signature: str) -> Path:
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    return cache_dir / f"geojson_segment_index_{digest}.pickle"
+
+
+def _load_persisted_geojson_segment_index(
+    cache_path: Path,
+    signature: str,
+) -> dict[tuple[str, str, str], list[Coordinate]] | None:
+    if not cache_path.exists():
+        return None
+    try:
+        with cache_path.open("rb") as handle:
+            payload = pickle.load(handle)
+    except (OSError, pickle.PickleError, EOFError):
+        return None
+
+    if not isinstance(payload, dict) or payload.get("signature") != signature:
+        return None
+    segment_index = payload.get("segment_index")
+    return segment_index if isinstance(segment_index, dict) else None
+
+
+def _persist_geojson_segment_index(
+    cache_path: Path,
+    signature: str,
+    segment_index: dict[tuple[str, str, str], list[Coordinate]],
+) -> None:
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("wb") as handle:
+            pickle.dump(
+                {"signature": signature, "segment_index": segment_index},
+                handle,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+    except OSError:
+        return

@@ -14,3 +14,6 @@ taipei geojson/
 map/geography/taipei_osmnx_streets.png
 map/geography/taipei_osmnx_streets.svg
 map/geography/taipei_streets.graphml
+
+# GIS Runtime Cache
+app/data/gis/.runtime-cache/

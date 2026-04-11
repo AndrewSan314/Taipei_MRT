@@ -25,7 +25,12 @@ class RouteEngine:
     def __init__(self, network: SubwayNetwork):
         self.network = network
         self.graph: dict[State, list[Edge]] = {}
+        self.states: tuple[State, ...] = ()
+        self.state_to_index: dict[State, int] = {}
+        self._precomputed_costs: list[list[Cost | None]] = []
+        self._precomputed_next: list[list[int | None]] = []
         self._build_graph()
+        self._precompute_shortest_paths()
 
     def _build_graph(self) -> None:
         for station_line in self.network.station_lines:
@@ -34,6 +39,8 @@ class RouteEngine:
         for segment in self.network.segments:
             forward = (segment.from_station_id, segment.line_id)
             backward = (segment.to_station_id, segment.line_id)
+            if forward not in self.graph or backward not in self.graph:
+                continue
             ride_cost = (segment.travel_sec, 0, 0, 1)
             self.graph[forward].append(
                 Edge(
@@ -55,6 +62,8 @@ class RouteEngine:
         for transfer in self.network.transfers:
             source = (transfer.station_id, transfer.from_line_id)
             target = (transfer.station_id, transfer.to_line_id)
+            if source not in self.graph or target not in self.graph:
+                continue
             self.graph[source].append(
                 Edge(
                     target=target,
@@ -65,10 +74,18 @@ class RouteEngine:
             )
 
         for walk_transfer in self.network.walk_transfers:
-            for source_line_id in sorted(self.network.station_to_lines[walk_transfer.from_station_id]):
+            source_line_ids = self.network.station_to_lines.get(walk_transfer.from_station_id)
+            target_line_ids = self.network.station_to_lines.get(walk_transfer.to_station_id)
+            if not source_line_ids or not target_line_ids:
+                continue
+            for source_line_id in sorted(source_line_ids):
                 source = (walk_transfer.from_station_id, source_line_id)
-                for target_line_id in sorted(self.network.station_to_lines[walk_transfer.to_station_id]):
+                if source not in self.graph:
+                    continue
+                for target_line_id in sorted(target_line_ids):
                     target = (walk_transfer.to_station_id, target_line_id)
+                    if target not in self.graph:
+                        continue
                     self.graph[source].append(
                         Edge(
                             target=target,
@@ -77,6 +94,78 @@ class RouteEngine:
                             duration_sec=walk_transfer.duration_sec,
                         )
                     )
+
+        # Keep deterministic traversal order, but sort once at build-time
+        # instead of sorting on every routing query.
+        for edges in self.graph.values():
+            edges.sort(
+                key=lambda item: (
+                    item.target[0],
+                    item.target[1],
+                    item.kind,
+                    item.duration_sec,
+                )
+            )
+
+    def _precompute_shortest_paths(self) -> None:
+        self.states = tuple(sorted(self.graph.keys()))
+        self.state_to_index = {
+            state: index
+            for index, state in enumerate(self.states)
+        }
+        state_count = len(self.states)
+        self._precomputed_costs = [
+            [None] * state_count
+            for _ in range(state_count)
+        ]
+        self._precomputed_next = [
+            [None] * state_count
+            for _ in range(state_count)
+        ]
+
+        for source_index, source_state in enumerate(self.states):
+            distances, next_hops = self._compute_shortest_paths_from_source(
+                source_index,
+                source_state,
+            )
+            self._precomputed_costs[source_index] = distances
+            self._precomputed_next[source_index] = next_hops
+
+    def _compute_shortest_paths_from_source(
+        self,
+        source_index: int,
+        source_state: State,
+    ) -> tuple[list[Cost | None], list[int | None]]:
+        state_count = len(self.states)
+        distances: list[Cost | None] = [None] * state_count
+        next_hops: list[int | None] = [None] * state_count
+        heap: list[tuple[Cost, State]] = [((0, 0, 0, 0), source_state)]
+
+        distances[source_index] = (0, 0, 0, 0)
+        next_hops[source_index] = source_index
+
+        while heap:
+            current_cost, state = heapq.heappop(heap)
+            state_index = self.state_to_index[state]
+            if current_cost != distances[state_index]:
+                continue
+
+            for edge in self.graph.get(state, []):
+                target_index = self.state_to_index[edge.target]
+                next_cost = self._add_cost(current_cost, edge.cost)
+                known_cost = distances[target_index]
+                if known_cost is not None and next_cost >= known_cost:
+                    continue
+
+                distances[target_index] = next_cost
+                next_hops[target_index] = (
+                    target_index
+                    if state_index == source_index
+                    else next_hops[state_index]
+                )
+                heapq.heappush(heap, (next_cost, edge.target))
+
+        return distances, next_hops
 
     def find_route(self, start_station_id: str, end_station_id: str) -> RouteResult:
         if start_station_id not in self.network.stations:
@@ -98,42 +187,21 @@ class RouteEngine:
             (start_station_id, line_id)
             for line_id in sorted(self.network.station_to_lines[start_station_id])
         ]
-        goal_states = {
+        goal_states = [
             (end_station_id, line_id)
             for line_id in self.network.station_to_lines[end_station_id]
-        }
+        ]
 
-        heap: list[tuple[Cost, State]] = []
-        distances: dict[State, Cost] = {}
-        parents: dict[State, tuple[State | None, Edge | None]] = {}
-
-        for state in start_states:
-            distances[state] = (0, 0, 0, 0)
-            parents[state] = (None, None)
-            heapq.heappush(heap, ((0, 0, 0, 0), state))
-
-        best_goal: State | None = None
-
-        while heap:
-            current_cost, state = heapq.heappop(heap)
-            if current_cost != distances.get(state):
-                continue
-            if state in goal_states:
-                best_goal = state
-                break
-
-            for edge in self.graph.get(state, []):
-                next_cost = self._add_cost(current_cost, edge.cost)
-                known_cost = distances.get(edge.target)
-                if known_cost is None or next_cost < known_cost:
-                    distances[edge.target] = next_cost
-                    parents[edge.target] = (state, edge)
-                    heapq.heappush(heap, (next_cost, edge.target))
-
-        if best_goal is None:
+        best_pair = self._find_best_precomputed_state_pair(start_states, goal_states)
+        if best_pair is None:
             raise ValueError(f"No route found between {start_station_id} and {end_station_id}")
 
-        return self._build_result(best_goal, distances[best_goal], parents)
+        source_index, goal_index, total_cost = best_pair
+        return self._build_result_from_precomputed(
+            source_index,
+            goal_index,
+            total_cost,
+        )
 
     def find_route_through_stations(self, station_ids: list[str]) -> RouteResult:
         if len(station_ids) < 2:
@@ -305,6 +373,31 @@ class RouteEngine:
             left[3] + right[3],
         )
 
+    def _find_best_precomputed_state_pair(
+        self,
+        start_states: list[State],
+        goal_states: list[State],
+    ) -> tuple[int, int, Cost] | None:
+        best_pair: tuple[int, int, Cost] | None = None
+
+        for start_state in start_states:
+            source_index = self.state_to_index.get(start_state)
+            if source_index is None:
+                continue
+            costs_from_source = self._precomputed_costs[source_index]
+            for goal_state in goal_states:
+                goal_index = self.state_to_index.get(goal_state)
+                if goal_index is None:
+                    continue
+                total_cost = costs_from_source[goal_index]
+                if total_cost is None:
+                    continue
+                candidate = (source_index, goal_index, total_cost)
+                if best_pair is None or total_cost < best_pair[2]:
+                    best_pair = candidate
+
+        return best_pair
+
     def _candidate_stations(
         self,
         x: float,
@@ -319,7 +412,7 @@ class RouteEngine:
             (station.id, self._distance(x, y, station.x, station.y))
             for station in self.network.stations.values()
         ]
-        candidates.sort(key=lambda item: item[1])
+        candidates.sort(key=lambda item: (item[1], item[0]))
         base_candidates = candidates
 
         if max_station_walk_sec is not None:
@@ -413,6 +506,61 @@ class RouteEngine:
             line_sequence=self._extract_line_sequence(states, steps),
             steps=steps,
         )
+
+    def _build_result_from_precomputed(
+        self,
+        source_index: int,
+        goal_index: int,
+        total_cost: Cost,
+    ) -> RouteResult:
+        state_indices = [source_index]
+        current_index = source_index
+
+        while current_index != goal_index:
+            next_index = self._precomputed_next[current_index][goal_index]
+            if next_index is None or next_index == current_index:
+                raise ValueError(
+                    f"No precomputed path found between {self.states[source_index]} and {self.states[goal_index]}"
+                )
+            state_indices.append(next_index)
+            current_index = next_index
+
+        states = [self.states[index] for index in state_indices]
+        steps: list[RouteStep] = []
+        for previous_state, current_state in zip(states, states[1:], strict=False):
+            edge = self._find_edge(previous_state, current_state)
+            if edge is None:
+                raise ValueError(f"Broken precomputed path edge: {previous_state} -> {current_state}")
+            steps.append(
+                RouteStep(
+                    kind=edge.kind,
+                    station_id=previous_state[0],
+                    line_id=previous_state[1],
+                    next_station_id=current_state[0],
+                    duration_sec=edge.duration_sec,
+                )
+            )
+
+        station_ids = [states[0][0]]
+        for step in steps:
+            if step.next_station_id and step.next_station_id != station_ids[-1]:
+                station_ids.append(step.next_station_id)
+
+        return RouteResult(
+            total_time_sec=total_cost[0],
+            walking_time_sec=total_cost[1],
+            transfer_count=total_cost[2],
+            stop_count=total_cost[3],
+            station_ids=station_ids,
+            line_sequence=self._extract_line_sequence(states, steps),
+            steps=steps,
+        )
+
+    def _find_edge(self, source: State, target: State) -> Edge | None:
+        for edge in self.graph.get(source, []):
+            if edge.target == target:
+                return edge
+        return None
 
     @staticmethod
     def _extract_line_sequence(states: list[State], steps: list[RouteStep]) -> list[str]:

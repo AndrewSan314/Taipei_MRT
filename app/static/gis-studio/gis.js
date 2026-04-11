@@ -12,6 +12,11 @@ const state = {
   lineById: new Map(),
   suppressNextMapClick: false,
   sidebarVisible: true,
+  sourceDataKeys: {
+    pickedPoints: null,
+    selectedStations: null,
+    route: null,
+  },
 };
 
 const elements = {
@@ -879,11 +884,6 @@ function buildRouteGeoJson(resultPayload) {
 }
 
 function updatePickedPointsSource() {
-  const source = state.map?.getSource(SOURCE_IDS.pickedPoints);
-  if (!source) {
-    return;
-  }
-
   const features = [];
   if (state.startPoint) {
     features.push({
@@ -905,28 +905,21 @@ function updatePickedPointsSource() {
       properties: { role: "end_point", label: "End point" },
     });
   }
-
-  source.setData({
+  setGeoJsonSourceDataIfChanged(SOURCE_IDS.pickedPoints, {
     type: "FeatureCollection",
     features,
-  });
+  }, "pickedPoints");
 }
 
 function updateSelectedStationsSource() {
-  const source = state.map?.getSource(SOURCE_IDS.selectedStations);
-  if (!source) {
-    return;
-  }
-
   const features = [];
   state.viaStationIds.forEach((stationId) => {
     features.push(buildStationFeature(stationId));
   });
-
-  source.setData({
+  setGeoJsonSourceDataIfChanged(SOURCE_IDS.selectedStations, {
     type: "FeatureCollection",
     features: features.filter(Boolean),
-  });
+  }, "selectedStations");
 }
 
 function buildStationFeature(stationId) {
@@ -949,10 +942,19 @@ function buildStationFeature(stationId) {
 }
 
 function updateRouteSource(featureCollection) {
-  const source = state.map?.getSource(SOURCE_IDS.route);
+  setGeoJsonSourceDataIfChanged(SOURCE_IDS.route, featureCollection, "route");
+}
+
+function setGeoJsonSourceDataIfChanged(sourceId, featureCollection, cacheKey) {
+  const source = state.map?.getSource(sourceId);
   if (!source) {
     return;
   }
+  const nextKey = JSON.stringify(featureCollection);
+  if (state.sourceDataKeys[cacheKey] === nextKey) {
+    return;
+  }
+  state.sourceDataKeys[cacheKey] = nextKey;
   source.setData(featureCollection);
 }
 

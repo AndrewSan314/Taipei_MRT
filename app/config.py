@@ -64,6 +64,9 @@ class Settings:
     gis_mbtiles_file: Path = Path(
         os.getenv("SUBWAY_GIS_MBTILES_FILE", str(DEFAULT_GIS_MBTILES_FILE))
     )
+    gis_line_simplify_tolerance_m: float = float(
+        os.getenv("SUBWAY_GIS_LINE_SIMPLIFY_TOLERANCE_M", "8.0")
+    )
     admin_scenarios_file: Path = Path(
         os.getenv("SUBWAY_ADMIN_SCENARIOS_FILE", str(DEFAULT_ADMIN_SCENARIOS_FILE))
     )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import pickle
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -109,7 +111,13 @@ def _load_geojson_cached(path_str: str, signature: str) -> dict[str, Any] | None
 
 @lru_cache(maxsize=4)
 def _load_walk_graph_cached(path_str: str, signature: str) -> WalkGraph:
-    return build_walk_graph(_load_geojson_cached(path_str, signature))
+    cached_graph = _load_persisted_walk_graph(path_str, signature)
+    if cached_graph is not None:
+        return cached_graph
+
+    walk_graph = build_walk_graph(_load_geojson_cached(path_str, signature))
+    _persist_walk_graph(path_str, signature, walk_graph)
+    return walk_graph
 
 
 def _is_valid_geojson(payload: dict[str, Any] | None) -> bool:
@@ -310,3 +318,37 @@ def _path_signature(path: Path) -> str:
         return f"{path}:missing"
     stat = path.stat()
     return f"{path}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _walk_graph_cache_path(path_str: str, signature: str) -> Path:
+    source_path = Path(path_str)
+    cache_dir = source_path.parent / ".runtime-cache"
+    digest = hashlib.sha256(f"{source_path.name}|{signature}".encode("utf-8")).hexdigest()
+    return cache_dir / f"walk_graph_{digest}.pickle"
+
+
+def _load_persisted_walk_graph(path_str: str, signature: str) -> WalkGraph | None:
+    cache_path = _walk_graph_cache_path(path_str, signature)
+    if not cache_path.exists():
+        return None
+    try:
+        with cache_path.open("rb") as handle:
+            payload = pickle.load(handle)
+    except (OSError, pickle.PickleError, EOFError):
+        return None
+
+    if not isinstance(payload, dict) or payload.get("signature") != signature:
+        return None
+
+    walk_graph = payload.get("walk_graph")
+    return walk_graph if isinstance(walk_graph, WalkGraph) else None
+
+
+def _persist_walk_graph(path_str: str, signature: str, walk_graph: WalkGraph) -> None:
+    cache_path = _walk_graph_cache_path(path_str, signature)
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("wb") as handle:
+            pickle.dump({"signature": signature, "walk_graph": walk_graph}, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    except OSError:
+        return

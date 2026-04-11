@@ -265,6 +265,7 @@ def find_nearest_station_by_walk(
     station_access_points_geojson: dict[str, Any] | None,
     walk_network_geojson: dict[str, Any] | None,
     walk_graph: WalkGraph | None = None,
+    targets_by_node: dict[Coordinate, list[StationAccessPoint]] | None = None,
 ) -> WalkPathResult:
     candidates = find_candidate_stations_by_walk(
         lon=lon,
@@ -274,6 +275,7 @@ def find_nearest_station_by_walk(
         walk_network_geojson=walk_network_geojson,
         walk_graph=walk_graph,
         limit=1,
+        targets_by_node=targets_by_node,
     )
     if not candidates:
         raise ValueError("No GIS stations available")
@@ -287,6 +289,7 @@ def find_candidate_stations_by_walk(
     station_access_points_geojson: dict[str, Any] | None,
     walk_network_geojson: dict[str, Any] | None,
     walk_graph: WalkGraph | None = None,
+    targets_by_node: dict[Coordinate, list[StationAccessPoint]] | None = None,
     limit: int | None = None,
 ) -> list[WalkPathResult]:
     if not station_coords_by_id:
@@ -300,6 +303,40 @@ def find_candidate_stations_by_walk(
             station_coords_by_id,
             limit=limit,
         )
+    if targets_by_node is not None:
+        start_coordinate = (float(lon), float(lat))
+        start_node = graph.nearest_node(lon, lat)
+        distance_m, previous_nodes, target_node, chosen_access = _dijkstra_to_best_access_point(
+            graph,
+            start_node,
+            targets_by_node,
+        )
+        if target_node is None or chosen_access is None:
+             return _candidate_stations_by_distance(
+                lon,
+                lat,
+                station_coords_by_id,
+                limit=limit,
+            )
+        
+        path_coordinates = _build_path_coordinates(
+            start_coordinate,
+            _reconstruct_path(previous_nodes, start_node, target_node),
+            chosen_access.coordinate,
+        )
+        total_distance_m = (
+            _connector_distance_m(start_coordinate, start_node)
+            + distance_m
+        )
+        return [WalkPathResult(
+            station_id=chosen_access.station_id,
+            distance_m=total_distance_m,
+            path_coordinates=path_coordinates,
+            access_point_coordinate=chosen_access.coordinate,
+            snapped_start_coordinate=start_node,
+            access_point_name=chosen_access.name,
+        )]
+
 
     access_points = extract_station_access_points(
         station_access_points_geojson,
@@ -382,6 +419,25 @@ def find_candidate_stations_by_walk(
     if limit is None or limit <= 0:
         return ordered_results
     return ordered_results[:limit]
+
+
+def build_walk_targets_by_node(
+    walk_graph: WalkGraph,
+    station_access_points_geojson: dict[str, Any] | None,
+    station_coords_by_id: dict[str, Coordinate],
+) -> dict[Coordinate, list[StationAccessPoint]]:
+    access_points = extract_station_access_points(
+        station_access_points_geojson,
+        station_coords_by_id,
+    )
+    targets_by_node: dict[Coordinate, list[StationAccessPoint]] = {}
+    for access_point in access_points:
+        if walk_graph.adjacency:
+            access_node = walk_graph.nearest_node(*access_point.coordinate)
+        else:
+            access_node = access_point.coordinate
+        targets_by_node.setdefault(access_node, []).append(access_point)
+    return targets_by_node
 
 
 def _dijkstra_to_best_access_point(

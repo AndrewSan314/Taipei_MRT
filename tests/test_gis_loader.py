@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.domain.models import Line
 from app.domain.models import Station
 from app.domain.models import SubwayNetwork
+from app.services import gis_loader
 from app.services.gis_loader import build_gis_payload
 from app.services.gis_loader import get_cached_walk_graph
 
@@ -100,6 +101,35 @@ class GisLoaderTests(unittest.TestCase):
                 second = get_cached_walk_graph(geojson_dir)
 
             self.assertIs(first, second)
+            self.assertEqual(mocked_build.call_count, 1)
+
+    def test_get_cached_walk_graph_reuses_persisted_cache_after_memory_clear(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            geojson_dir = Path(temp_dir)
+            _write_geojson(
+                geojson_dir / "walk_network.geojson",
+                {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "geometry": {
+                                "type": "LineString",
+                                "coordinates": [[121.5, 25.05], [121.5005, 25.0505]],
+                            },
+                            "properties": {},
+                        }
+                    ],
+                },
+            )
+
+            gis_loader._load_walk_graph_cached.cache_clear()
+            with patch("app.services.gis_loader.build_walk_graph", wraps=gis_loader.build_walk_graph) as mocked_build:
+                first = get_cached_walk_graph(geojson_dir)
+                gis_loader._load_walk_graph_cached.cache_clear()
+                second = get_cached_walk_graph(geojson_dir)
+
+            self.assertEqual(first.adjacency, second.adjacency)
             self.assertEqual(mocked_build.call_count, 1)
 
 
