@@ -27,6 +27,11 @@ from app.services.subway_network_store import save_network_definition
 from app.services.runtime import get_network as get_subway_network
 from app.services.runtime import get_route_engine
 from app.services.runtime import refresh_runtime_caches
+from app.services.admin_scenarios import (
+    load_admin_scenarios,
+    save_admin_scenarios,
+    default_admin_scenarios,
+)
 
 router = APIRouter(prefix="/api", tags=["subway"])
 settings = get_settings()
@@ -108,6 +113,16 @@ class BuilderNetworkSaveRequest(BaseModel):
     station_lines: list[BuilderStationLinePayload]
     default_travel_sec: int = 90
     default_transfer_sec: int = 180
+
+
+class AdminScenarioSaveRequest(BaseModel):
+    source: str = "client"
+    ui_mode: str = "rain"
+    rain_zones: list[dict] = Field(default_factory=list)
+    block_segments: list[dict] = Field(default_factory=list)
+    banned_stations: list[dict] = Field(default_factory=list)
+    generated_at: str | None = None
+    map_bounds: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -865,3 +880,24 @@ async def save_builder_network(request: BuilderNetworkSaveRequest):
         "message": "Network definition saved",
         "saved": saved,
     }
+
+
+@router.get("/admin/scenarios")
+async def get_admin_scenarios():
+    scenarios = load_admin_scenarios(settings.admin_scenarios_file)
+    return {"status": "ok", "scenarios": scenarios}
+
+
+@router.put("/admin/scenarios")
+async def save_admin_scenarios(request: AdminScenarioSaveRequest):
+    payload = request.dict()
+    scenarios = save_admin_scenarios(settings.admin_scenarios_file, payload)
+    return {"status": "ok", "scenarios": scenarios}
+
+
+@router.delete("/admin/scenarios")
+async def reset_admin_scenarios():
+    scenarios = save_admin_scenarios(
+        settings.admin_scenarios_file, default_admin_scenarios()
+    )
+    return {"status": "ok", "scenarios": scenarios}
