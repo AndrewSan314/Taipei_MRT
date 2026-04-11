@@ -101,16 +101,50 @@ async function init() {
 }
 
 async function hydrateScenarioState() {
+  const LOCAL_STORAGE_KEY = 'mrt_admin_scenarios_backup';
+  let serverPayload = null;
+  let localPayload = null;
+
+  // 1. Try to load from Server
   try {
     const response = await fetch('/api/admin/scenarios');
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload?.detail || 'Failed to load admin scenarios.');
+    const result = await response.json();
+    if (response.ok) {
+      serverPayload = result?.scenarios || result;
     }
-    applyScenarioPayload(payload?.scenarios || {});
   } catch (error) {
-    console.warn('Unable to restore admin scenarios from server', error);
-    applyScenarioPayload({});
+    console.warn('Unable to load from server', error);
+  }
+
+  // 2. Try to load from LocalStorage
+  try {
+    const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (stored) {
+      localPayload = JSON.parse(stored);
+    }
+  } catch (error) {
+    console.warn('Unable to load from localStorage', error);
+  }
+
+  // 3. Select the best payload (prefer newer generated_at)
+  let bestPayload = serverPayload || localPayload || {};
+  if (serverPayload && localPayload) {
+    const serverTime = new Date(serverPayload.generated_at || 0).getTime();
+    const localTime = new Date(localPayload.generated_at || 0).getTime();
+    if (localTime > serverTime) {
+      console.info('LocalStorage is newer than Server. Using local backup.');
+      bestPayload = localPayload;
+    }
+  }
+
+  applyScenarioPayload(bestPayload);
+}
+
+function saveToLocalStorage(payload) {
+  try {
+    localStorage.setItem('mrt_admin_scenarios_backup', JSON.stringify(payload));
+  } catch (error) {
+    console.warn('Failed to save to localStorage', error);
   }
 }
 
@@ -173,6 +207,7 @@ async function saveScenarioState() {
     }
     // No longer overwriting state with payload from server to avoid race conditions during rapid drawing.
     // The local state is the source of truth; the server just persists it.
+    saveToLocalStorage(payload);
     renderMetrics();
     updateRulesSummary();
   } catch (error) {
