@@ -17,3 +17,10 @@ map/geography/taipei_streets.graphml
 
 # GIS Runtime Cache
 app/data/gis/.runtime-cache/
+app/data/gis/.cache/
+
+# Scratch & Dev
+scratch/
+UAT-*.md
+*.png
+*.webp

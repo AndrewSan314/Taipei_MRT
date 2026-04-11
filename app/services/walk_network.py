@@ -1,10 +1,13 @@
-from __future__ import annotations
-
+import os
+import pickle
 import heapq
 import math
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 Coordinate = tuple[float, float]
@@ -35,9 +38,11 @@ class WalkGraph:
     adjacency: dict[Coordinate, list[tuple[Coordinate, float]]]
     snapped_node_cache: dict[Coordinate, Coordinate] = field(default_factory=dict)
     spatial_index: dict[CellId, list[Coordinate]] = field(default_factory=dict)
+    edge_geometry: dict[tuple[Coordinate, Coordinate], list[Coordinate]] = field(default_factory=dict)
     grid_origin: Coordinate = (0.0, 0.0)
     grid_cell_size: Coordinate = (MIN_GRID_CELL_SIZE_DEG, MIN_GRID_CELL_SIZE_DEG)
     grid_bounds: tuple[int, int, int, int] = (0, 0, 0, 0)
+    is_simplified: bool = False
 
     def __post_init__(self) -> None:
         if self.adjacency and not self.spatial_index:
@@ -102,6 +107,20 @@ class WalkGraph:
             raise ValueError("Unable to snap point to walk graph")
         self.snapped_node_cache[point] = best_node
         return best_node
+
+    def load_geometry(self, settings: Any) -> None:
+        """Lazily load detailed edge geometry from the split cache."""
+        if self.edge_geometry:
+            return
+            
+        _, cache_geom_path = _get_cache_paths(settings)
+        if cache_geom_path.exists():
+            try:
+                with open(cache_geom_path, "rb") as f:
+                    self.edge_geometry = pickle.load(f)
+                    logger.info(f"Loaded edge geometry from {cache_geom_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load edge geometry cache: {e}")
 
     def _cell_id(self, lon: float, lat: float) -> CellId:
         origin_lon, origin_lat = self.grid_origin
@@ -169,7 +188,16 @@ class WalkGraph:
         return min(candidate_bounds_m)
 
 
-def build_walk_graph(walk_network_geojson: dict[str, Any] | None) -> WalkGraph:
+def build_walk_graph(
+    walk_network_geojson: dict[str, Any] | None,
+    settings: Any | None = None,
+) -> WalkGraph:
+    # Try loading from cache first if settings are provided
+    if settings:
+        cached_graph = load_cache(settings)
+        if cached_graph:
+            return cached_graph
+
     adjacency: dict[Coordinate, list[tuple[Coordinate, float]]] = {}
     if not _is_valid_geojson(walk_network_geojson):
         return WalkGraph(adjacency={})
@@ -184,7 +212,161 @@ def build_walk_graph(walk_network_geojson: dict[str, Any] | None) -> WalkGraph:
                 adjacency.setdefault(start, []).append((end, distance_m))
                 adjacency.setdefault(end, []).append((start, distance_m))
 
-    return WalkGraph(adjacency=adjacency)
+    graph = WalkGraph(adjacency=adjacency)
+    
+    # Apply simplification to reduce cold-start latency
+    graph = _simplify_graph(graph)
+
+    # Save to cache if possible
+    if settings:
+        save_cache(settings, graph)
+        
+    return graph
+
+
+def _simplify_graph(graph: WalkGraph) -> WalkGraph:
+    """Collapses degree-2 nodes to reduce unpickling time and routing complexity."""
+    adj = graph.adjacency
+    degrees = {node: len(neighbors) for node, neighbors in adj.items()}
+    critical_nodes = {node for node, deg in degrees.items() if deg != 2}
+    
+    logger.info(f"Simplifying graph: {len(adj)} nodes -> target critical {len(critical_nodes)}")
+    
+    new_adj: dict[Coordinate, list[tuple[Coordinate, float]]] = {node: [] for node in critical_nodes}
+    edge_geometry: dict[tuple[Coordinate, Coordinate], list[Coordinate]] = {}
+    visited_segments = set()
+
+    for start_node in critical_nodes:
+        for neighbor, initial_dist in adj[start_node]:
+            if (start_node, neighbor) in visited_segments:
+                continue
+
+            path = [start_node, neighbor]
+            current_dist = initial_dist
+            prev = start_node
+            curr = neighbor
+            
+            while curr not in critical_nodes:
+                next_neighbors = [n for n, d in adj[curr] if n != prev]
+                if not next_neighbors: break
+                
+                # Find neighbor entry
+                next_node = None
+                dist_to_next = 0.0
+                for n, d in adj[curr]:
+                    if n == next_neighbors[0]:
+                        next_node, dist_to_next = n, d
+                        break
+                
+                if next_node is None: break
+                
+                path.append(next_node)
+                current_dist += dist_to_next
+                prev, curr = curr, next_node
+            
+            # Safety: Ensure curr is in new_adj
+            if curr not in new_adj:
+                new_adj[curr] = []
+            if start_node not in new_adj:
+                new_adj[start_node] = []
+
+            new_adj[start_node].append((curr, current_dist))
+            new_adj[curr].append((start_node, current_dist))
+            
+            # Store full intermediate geometry for both directions
+            edge_geometry[(start_node, curr)] = path
+            edge_geometry[(curr, start_node)] = list(reversed(path))
+            
+            # Map all segments in this path to visited
+            for i in range(len(path) - 1):
+                p_v, c_v = path[i], path[i+1]
+                visited_segments.add((p_v, c_v))
+                visited_segments.add((c_v, p_v))
+
+    # Construct the simplified graph
+    simplified = WalkGraph(
+        adjacency=new_adj,
+        edge_geometry=edge_geometry,
+        snapped_node_cache=graph.snapped_node_cache,
+        # Rebuild spatial_index automatically in __post_init__
+        is_simplified=True
+    )
+    logger.info(f"Graph simplified to {len(simplified.adjacency)} nodes.")
+    return simplified
+
+
+def _get_cache_paths(settings: Any) -> tuple[Path, Path]:
+    from pathlib import Path
+    cache_dir = Path(settings.qgis_geojson_dir) / ".cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / "walk_graph.pkl", cache_dir / "walk_graph_geom.pkl"
+
+
+def _get_source_mtime(settings: Any) -> float:
+    from pathlib import Path
+    geojson_dir = Path(settings.qgis_geojson_dir)
+    mtimes = [0.0]
+    if geojson_dir.exists():
+        for f in geojson_dir.glob("*.json"):
+            mtimes.append(f.stat().st_mtime)
+        for f in geojson_dir.glob("*.geojson"):
+            mtimes.append(f.stat().st_mtime)
+    return max(mtimes)
+
+
+def load_cache(settings: Any) -> WalkGraph | None:
+    cache_topo_path, _ = _get_cache_paths(settings)
+    try:
+        if not cache_topo_path.exists():
+            return None
+            
+        source_mtime = _get_source_mtime(settings)
+        cache_mtime = os.path.getmtime(cache_topo_path)
+        
+        if cache_mtime < source_mtime:
+            logger.info("WalkGraph cache is stale, rebuilding...")
+            return None
+            
+        import gc
+        gc_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            with open(cache_topo_path, "rb") as f:
+                graph = pickle.load(f)
+                logger.info(f"Loaded WalkGraph Topology from cache: {cache_topo_path}")
+                # Geometry is not loaded yet (Lazy loading)
+                return graph
+        finally:
+            if gc_enabled:
+                gc.enable()
+    except Exception as e:
+        logger.warning(f"Failed to load WalkGraph cache: {e}")
+        return None
+
+
+def save_cache(settings: Any, graph: WalkGraph) -> None:
+    cache_topo_path, cache_geom_path = _get_cache_paths(settings)
+    try:
+        # Save Topology (Heavy list counts, but small coordinates)
+        # We strip geometry before pickling to cache_topo_path
+        geometry_backup = graph.edge_geometry
+        graph.edge_geometry = {} 
+        try:
+            with open(cache_topo_path, "wb") as f:
+                pickle.dump(graph, f, protocol=5)
+            
+            # Save Geometry separately
+            with open(cache_geom_path, "wb") as f:
+                pickle.dump(geometry_backup, f, protocol=5)
+            
+            logger.info(f"Saved split WalkGraph cache to {cache_topo_path}")
+        finally:
+            graph.edge_geometry = geometry_backup
+    except Exception as e:
+        logger.warning(f"Failed to save WalkGraph cache: {e}")
+        logger.info(f"Saved WalkGraph to cache: {cache_path}")
+    except Exception as e:
+        logger.warning(f"Failed to save WalkGraph cache: {e}")
 
 
 def _build_spatial_index(
@@ -266,6 +448,7 @@ def find_nearest_station_by_walk(
     walk_network_geojson: dict[str, Any] | None,
     walk_graph: WalkGraph | None = None,
     targets_by_node: dict[Coordinate, list[StationAccessPoint]] | None = None,
+    settings: Any | None = None,
 ) -> WalkPathResult:
     candidates = find_candidate_stations_by_walk(
         lon=lon,
@@ -276,6 +459,7 @@ def find_nearest_station_by_walk(
         walk_graph=walk_graph,
         limit=1,
         targets_by_node=targets_by_node,
+        settings=settings,
     )
     if not candidates:
         raise ValueError("No GIS stations available")
@@ -291,11 +475,12 @@ def find_candidate_stations_by_walk(
     walk_graph: WalkGraph | None = None,
     targets_by_node: dict[Coordinate, list[StationAccessPoint]] | None = None,
     limit: int | None = None,
+    settings: Any | None = None,
 ) -> list[WalkPathResult]:
     if not station_coords_by_id:
         raise ValueError("No GIS stations available")
 
-    graph = walk_graph or build_walk_graph(walk_network_geojson)
+    graph = walk_graph or build_walk_graph(walk_network_geojson, settings=settings)
     if not graph.adjacency:
         return _candidate_stations_by_distance(
             lon,
@@ -319,9 +504,13 @@ def find_candidate_stations_by_walk(
                 limit=limit,
             )
         
+        # Ensure geometry is loaded if needed
+        if graph.is_simplified and not graph.edge_geometry and settings:
+            graph.load_geometry(settings)
+
         path_coordinates = _build_path_coordinates(
             start_coordinate,
-            _reconstruct_path(previous_nodes, start_node, target_node),
+            _reconstruct_path(previous_nodes, start_node, target_node, graph=graph),
             chosen_access.coordinate,
         )
         total_distance_m = (
@@ -370,9 +559,13 @@ def find_candidate_stations_by_walk(
             graph_distance_m = distances.get(access_node)
             if graph_distance_m is None:
                 continue
+            # Ensure geometry is loaded if needed
+            if graph.is_simplified and not graph.edge_geometry and settings:
+                graph.load_geometry(settings)
+
             path_coordinates = _build_path_coordinates(
                 start_coordinate,
-                _reconstruct_path(previous_nodes, start_node, access_node),
+                _reconstruct_path(previous_nodes, start_node, access_node, graph=graph),
                 access_point.coordinate,
             )
             total_distance_m = (
@@ -534,14 +727,42 @@ def _reconstruct_path(
     previous_nodes: dict[Coordinate, Coordinate],
     start_node: Coordinate,
     target_node: Coordinate,
+    graph: WalkGraph | None = None,
 ) -> list[Coordinate]:
-    path = [target_node]
+    simplified_path = [target_node]
     cursor = target_node
     while cursor != start_node:
         cursor = previous_nodes[cursor]
-        path.append(cursor)
-    path.reverse()
-    return path
+        simplified_path.append(cursor)
+    simplified_path.reverse()
+
+    if graph is None or not graph.is_simplified:
+        return simplified_path
+
+    # If the graph is simplified, expand edges using edge_geometry
+    full_path: list[Coordinate] = []
+    for i in range(len(simplified_path) - 1):
+        u, v = simplified_path[i], simplified_path[i+1]
+        geom = graph.edge_geometry.get((u, v))
+        if not geom:
+            geom = graph.edge_geometry.get((v, u))
+            if geom:
+                geom = list(reversed(geom))
+        
+        if geom:
+            # Avoid duplicating the last point of the previous segment
+            if full_path:
+                full_path.extend(geom[1:])
+            else:
+                full_path.extend(geom)
+        else:
+            # Fallback to straight line if geometry missing
+            if full_path:
+                full_path.append(v)
+            else:
+                full_path.extend([u, v])
+    
+    return full_path if full_path else simplified_path
 
 
 def _build_path_coordinates(
