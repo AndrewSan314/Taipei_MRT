@@ -4,6 +4,8 @@ __pycache__/
 app/data/debug_real_map_station_overlay*.jpg
 app/data/station_positions_real_map.json
 cache/
+.tmp/
+.tmp-test/
 debug_sample_tile.png
 OSMB-*.geojson
 *.osm.pbf

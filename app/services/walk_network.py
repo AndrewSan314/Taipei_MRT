@@ -266,19 +266,39 @@ def find_nearest_station_by_walk(
     walk_network_geojson: dict[str, Any] | None,
     walk_graph: WalkGraph | None = None,
 ) -> WalkPathResult:
+    candidates = find_candidate_stations_by_walk(
+        lon=lon,
+        lat=lat,
+        station_coords_by_id=station_coords_by_id,
+        station_access_points_geojson=station_access_points_geojson,
+        walk_network_geojson=walk_network_geojson,
+        walk_graph=walk_graph,
+        limit=1,
+    )
+    if not candidates:
+        raise ValueError("No GIS stations available")
+    return candidates[0]
+
+
+def find_candidate_stations_by_walk(
+    lon: float,
+    lat: float,
+    station_coords_by_id: dict[str, Coordinate],
+    station_access_points_geojson: dict[str, Any] | None,
+    walk_network_geojson: dict[str, Any] | None,
+    walk_graph: WalkGraph | None = None,
+    limit: int | None = None,
+) -> list[WalkPathResult]:
     if not station_coords_by_id:
         raise ValueError("No GIS stations available")
 
     graph = walk_graph or build_walk_graph(walk_network_geojson)
     if not graph.adjacency:
-        station_id, distance_m = _nearest_station_by_distance(lon, lat, station_coords_by_id)
-        station_coordinate = station_coords_by_id[station_id]
-        return WalkPathResult(
-            station_id=station_id,
-            distance_m=distance_m,
-            path_coordinates=[(lon, lat), station_coordinate],
-            access_point_coordinate=station_coordinate,
-            snapped_start_coordinate=(lon, lat),
+        return _candidate_stations_by_distance(
+            lon,
+            lat,
+            station_coords_by_id,
+            limit=limit,
         )
 
     access_points = extract_station_access_points(
@@ -286,57 +306,82 @@ def find_nearest_station_by_walk(
         station_coords_by_id,
     )
     if not access_points:
-        station_id, distance_m = _nearest_station_by_distance(lon, lat, station_coords_by_id)
-        station_coordinate = station_coords_by_id[station_id]
-        return WalkPathResult(
-            station_id=station_id,
-            distance_m=distance_m,
-            path_coordinates=[(lon, lat), station_coordinate],
-            access_point_coordinate=station_coordinate,
-            snapped_start_coordinate=(lon, lat),
+        return _candidate_stations_by_distance(
+            lon,
+            lat,
+            station_coords_by_id,
+            limit=limit,
         )
 
     start_coordinate = (float(lon), float(lat))
     start_node = graph.nearest_node(lon, lat)
-    targets_by_node: dict[Coordinate, list[StationAccessPoint]] = {}
-    for access_point in access_points:
-        access_node = graph.nearest_node(*access_point.coordinate)
-        targets_by_node.setdefault(access_node, []).append(access_point)
-
-    graph_distance_m, previous_nodes, target_node, chosen_access = _dijkstra_to_best_access_point(
+    distances, previous_nodes = _dijkstra_all_nodes(
         graph,
         start_node,
-        targets_by_node,
     )
-    if target_node is None or chosen_access is None:
-        station_id, distance_m = _nearest_station_by_distance(lon, lat, station_coords_by_id)
-        station_coordinate = station_coords_by_id[station_id]
-        return WalkPathResult(
-            station_id=station_id,
-            distance_m=distance_m,
-            path_coordinates=[(lon, lat), station_coordinate],
-            access_point_coordinate=station_coordinate,
-            snapped_start_coordinate=(lon, lat),
+    targets_by_station_id: dict[str, list[tuple[Coordinate, StationAccessPoint]]] = {}
+    for access_point in access_points:
+        access_node = graph.nearest_node(*access_point.coordinate)
+        targets_by_station_id.setdefault(access_point.station_id, []).append((access_node, access_point))
+
+    start_connector_distance_m = _connector_distance_m(start_coordinate, start_node)
+    best_result_by_station_id: dict[str, WalkPathResult] = {}
+    for station_id, targets in targets_by_station_id.items():
+        best_candidate: WalkPathResult | None = None
+        best_score: tuple[float, str, float, float] | None = None
+        for access_node, access_point in targets:
+            graph_distance_m = distances.get(access_node)
+            if graph_distance_m is None:
+                continue
+            path_coordinates = _build_path_coordinates(
+                start_coordinate,
+                _reconstruct_path(previous_nodes, start_node, access_node),
+                access_point.coordinate,
+            )
+            total_distance_m = (
+                start_connector_distance_m
+                + graph_distance_m
+                + _connector_distance_m(access_node, access_point.coordinate)
+            )
+            score = (
+                total_distance_m,
+                station_id,
+                access_point.coordinate[0],
+                access_point.coordinate[1],
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                best_candidate = WalkPathResult(
+                    station_id=station_id,
+                    distance_m=total_distance_m,
+                    path_coordinates=path_coordinates,
+                    access_point_coordinate=access_point.coordinate,
+                    snapped_start_coordinate=start_node,
+                    access_point_name=access_point.name,
+                )
+        if best_candidate is not None:
+            best_result_by_station_id[station_id] = best_candidate
+
+    if not best_result_by_station_id:
+        return _candidate_stations_by_distance(
+            lon,
+            lat,
+            station_coords_by_id,
+            limit=limit,
         )
 
-    path_coordinates = _build_path_coordinates(
-        start_coordinate,
-        _reconstruct_path(previous_nodes, start_node, target_node),
-        chosen_access.coordinate,
+    ordered_results = sorted(
+        best_result_by_station_id.values(),
+        key=lambda item: (
+            item.distance_m,
+            item.station_id,
+            item.access_point_coordinate[0],
+            item.access_point_coordinate[1],
+        ),
     )
-    best_distance_m = (
-        _connector_distance_m(start_coordinate, start_node)
-        + graph_distance_m
-        + _connector_distance_m(target_node, chosen_access.coordinate)
-    )
-    return WalkPathResult(
-        station_id=chosen_access.station_id,
-        distance_m=best_distance_m,
-        path_coordinates=path_coordinates,
-        access_point_coordinate=chosen_access.coordinate,
-        snapped_start_coordinate=start_node,
-        access_point_name=chosen_access.name,
-    )
+    if limit is None or limit <= 0:
+        return ordered_results
+    return ordered_results[:limit]
 
 
 def _dijkstra_to_best_access_point(
@@ -384,6 +429,30 @@ def _dijkstra_to_best_access_point(
     if best_target_node is None or best_access is None:
         return float("inf"), previous_nodes, None, None
     return distances[best_target_node], previous_nodes, best_target_node, best_access
+
+
+def _dijkstra_all_nodes(
+    graph: WalkGraph,
+    start_node: Coordinate,
+) -> tuple[dict[Coordinate, float], dict[Coordinate, Coordinate]]:
+    distances: dict[Coordinate, float] = {start_node: 0.0}
+    previous_nodes: dict[Coordinate, Coordinate] = {}
+    queue: list[tuple[float, Coordinate]] = [(0.0, start_node)]
+
+    while queue:
+        current_distance, current_node = heapq.heappop(queue)
+        if current_distance > distances.get(current_node, float("inf")):
+            continue
+
+        for neighbor_node, edge_distance_m in graph.adjacency.get(current_node, []):
+            candidate_distance = current_distance + edge_distance_m
+            if candidate_distance >= distances.get(neighbor_node, float("inf")):
+                continue
+            distances[neighbor_node] = candidate_distance
+            previous_nodes[neighbor_node] = current_node
+            heapq.heappush(queue, (candidate_distance, neighbor_node))
+
+    return distances, previous_nodes
 
 
 def _choose_best_access_point(
@@ -495,6 +564,39 @@ def _nearest_station_by_distance(
     if best_station_id is None:
         raise ValueError("No GIS stations available")
     return best_station_id, best_distance_m
+
+
+def _candidate_stations_by_distance(
+    lon: float,
+    lat: float,
+    station_coords_by_id: dict[str, Coordinate],
+    limit: int | None = None,
+) -> list[WalkPathResult]:
+    ordered_candidates = sorted(
+        (
+            (
+                station_id,
+                haversine_distance_m(lat, lon, station_lat, station_lon),
+                (station_lon, station_lat),
+            )
+            for station_id, (station_lon, station_lat) in station_coords_by_id.items()
+        ),
+        key=lambda item: (item[1], item[0]),
+    )
+
+    results = [
+        WalkPathResult(
+            station_id=station_id,
+            distance_m=distance_m,
+            path_coordinates=[(lon, lat), coordinate],
+            access_point_coordinate=coordinate,
+            snapped_start_coordinate=(lon, lat),
+        )
+        for station_id, distance_m, coordinate in ordered_candidates
+    ]
+    if limit is None or limit <= 0:
+        return results
+    return results[:limit]
 
 
 def haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

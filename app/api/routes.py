@@ -8,23 +8,25 @@ from fastapi import HTTPException
 from fastapi.responses import Response
 
 from app.config import get_settings
-from app.services.calibration_store import save_station_positions
+from app.services.admin_scenarios import apply_admin_scenarios_to_network
+from app.services.admin_scenarios import build_admin_scenario_effects
+from app.services.admin_scenarios import default_admin_scenarios
+from app.services.admin_scenarios import load_admin_scenarios
+from app.services.admin_scenarios import save_admin_scenarios as save_admin_scenarios_in_store
 from app.services.gis_loader import build_gis_payload
 from app.services.gis_station_store import delete_gis_station as delete_gis_station_in_store
 from app.services.gis_station_store import save_gis_station_positions
 from app.services.gis_loader import get_cached_walk_graph
+from app.services.gis_route import find_candidate_stations_by_walk
 from app.services.gis_route import extract_station_coordinates
 from app.services.gis_route_geometry import build_ride_path_features
 from app.services.gis_route import build_walk_graph
-from app.services.gis_route import find_nearest_station_by_walk
 from app.services.gis_route import walking_time_sec
 from app.services.mbtiles import get_mbtiles_metadata
 from app.services.mbtiles import read_mbtiles_tile
-from app.services.subway_network_store import load_network_definition
-from app.services.subway_network_store import save_network_definition
+from app.services.route_engine import RouteEngine
 from app.services.runtime import get_network as get_subway_network
 from app.services.runtime import get_route_engine
-from app.services.runtime import refresh_runtime_caches
 
 router = APIRouter(prefix="/api", tags=["subway"])
 settings = get_settings()
@@ -67,6 +69,41 @@ class GisStationPositionPayload(BaseModel):
 
 class GisStationSaveRequest(BaseModel):
     stations: list[GisStationPositionPayload]
+
+
+class AdminCoordinatePayload(BaseModel):
+    lon: float
+    lat: float
+
+
+class AdminRainZonePayload(BaseModel):
+    id: str | None = None
+    center: AdminCoordinatePayload
+    radius_m: int
+
+
+class AdminBlockSegmentPayload(BaseModel):
+    id: str | None = None
+    kind: str = "line"
+    from_: AdminCoordinatePayload = Field(alias="from")
+    to: AdminCoordinatePayload
+
+
+class AdminBannedStationPayload(BaseModel):
+    id: str
+    name: str | None = None
+    lon: float | None = None
+    lat: float | None = None
+
+
+class AdminScenarioSaveRequest(BaseModel):
+    source: str | None = None
+    generated_at: str | None = None
+    ui_mode: str = "rain"
+    map_bounds: dict | None = None
+    rain_zones: list[AdminRainZonePayload] = Field(default_factory=list)
+    block_segments: list[AdminBlockSegmentPayload] = Field(default_factory=list)
+    banned_stations: list[AdminBannedStationPayload] = Field(default_factory=list)
 
 
 class CalibrationStationPayload(BaseModel):
@@ -113,8 +150,8 @@ def _raise_legacy_api_removed() -> None:
     )
 
 
-def _network_payload() -> dict:
-    network = get_subway_network()
+def _network_payload(network=None) -> dict:
+    network = network or get_subway_network()
     return {
         "map": {
             "image_url": f"/map/{settings.map_image_name}",
@@ -166,10 +203,10 @@ def _network_payload() -> dict:
     }
 
 
-def _station_lookup_payload() -> dict[str, dict]:
+def _station_lookup_payload_for_network(network) -> dict[str, dict]:
     return {
         station["id"]: station
-        for station in _network_payload()["stations"]
+        for station in _network_payload(network)["stations"]
     }
 
 
@@ -185,131 +222,158 @@ def _enrich_route_payload(route_payload: dict, station_lookup: dict[str, dict], 
     return route_payload
 
 
-def _build_network_payload_from_builder(request: BuilderNetworkSaveRequest) -> dict:
-    runtime_network = get_subway_network()
-    existing_station_lookup = {
-        station.id: {
-            "x": station.x,
-            "y": station.y,
-        }
-        for station in runtime_network.stations.values()
-    }
+def _build_gis_payload_for_network(network, include_walk_network: bool = False) -> dict:
+    fallback_bounds = (
+        settings.fallback_min_lon,
+        settings.fallback_min_lat,
+        settings.fallback_max_lon,
+        settings.fallback_max_lat,
+    )
+    return build_gis_payload(
+        network=network,
+        qgis_geojson_dir=settings.qgis_geojson_dir,
+        map_width=settings.map_width,
+        map_height=settings.map_height,
+        fallback_bounds=fallback_bounds,
+        include_walk_network=include_walk_network,
+    )
 
-    station_ids = [station.id for station in request.stations]
-    line_ids = [line.id for line in request.lines]
 
-    if len(station_ids) != len(set(station_ids)):
-        raise HTTPException(status_code=400, detail="Duplicate station id detected")
-    if len(line_ids) != len(set(line_ids)):
-        raise HTTPException(status_code=400, detail="Duplicate line id detected")
-    if request.default_travel_sec <= 0:
-        raise HTTPException(status_code=400, detail="default_travel_sec must be > 0")
-    if request.default_transfer_sec <= 0:
-        raise HTTPException(status_code=400, detail="default_transfer_sec must be > 0")
-
-    known_station_ids = set(station_ids)
-    known_line_ids = set(line_ids)
-
-    line_membership: dict[str, list[BuilderStationLinePayload]] = {}
-    for station_line in request.station_lines:
-        if station_line.station_id not in known_station_ids:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown station_id in station_lines: {station_line.station_id}",
-            )
-        if station_line.line_id not in known_line_ids:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown line_id in station_lines: {station_line.line_id}",
-            )
-        if station_line.seq <= 0:
-            raise HTTPException(status_code=400, detail="station_lines seq must be > 0")
-
-        line_membership.setdefault(station_line.line_id, []).append(station_line)
-
-    segments: list[dict] = []
-    station_to_lines: dict[str, set[str]] = {}
-
-    for line_id, station_lines in line_membership.items():
-        ordered = sorted(station_lines, key=lambda item: (item.seq, item.station_id))
-        seen_station_ids: set[str] = set()
-        ordered_station_ids: list[str] = []
-
-        for station_line in ordered:
-            if station_line.station_id in seen_station_ids:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Duplicate station {station_line.station_id} on line {line_id}",
-                )
-            seen_station_ids.add(station_line.station_id)
-            ordered_station_ids.append(station_line.station_id)
-            station_to_lines.setdefault(station_line.station_id, set()).add(line_id)
-
-        for from_station_id, to_station_id in zip(ordered_station_ids, ordered_station_ids[1:], strict=False):
-            segments.append(
-                {
-                    "line_id": line_id,
-                    "from_station_id": from_station_id,
-                    "to_station_id": to_station_id,
-                    "travel_sec": request.default_travel_sec,
-                }
-            )
-
-    transfers: list[dict] = []
-    for station_id, station_line_ids in sorted(station_to_lines.items()):
-        ordered_line_ids = sorted(station_line_ids)
-        for from_line_id in ordered_line_ids:
-            for to_line_id in ordered_line_ids:
-                if from_line_id == to_line_id:
-                    continue
-                transfers.append(
-                    {
-                        "station_id": station_id,
-                        "from_line_id": from_line_id,
-                        "to_line_id": to_line_id,
-                        "transfer_sec": request.default_transfer_sec,
-                    }
-                )
-
+def _serialize_admin_scenarios(request: AdminScenarioSaveRequest) -> dict:
     return {
-        "stations": [
+        "source": request.source or "server",
+        "generated_at": request.generated_at,
+        "ui_mode": request.ui_mode,
+        "map_bounds": request.map_bounds,
+        "rain_zones": [
             {
-                "id": station.id,
-                "name": station.name,
-                "x": existing_station_lookup.get(station.id, {}).get("x", station.x),
-                "y": existing_station_lookup.get(station.id, {}).get("y", station.y),
-                "diagram_x": station.x,
-                "diagram_y": station.y,
+                "id": item.id,
+                "center": {
+                    "lon": item.center.lon,
+                    "lat": item.center.lat,
+                },
+                "radius_m": item.radius_m,
             }
-            for station in request.stations
+            for item in request.rain_zones
         ],
-        "lines": [
+        "block_segments": [
             {
-                "id": line.id,
-                "name": line.name,
-                "color": line.color,
+                "id": item.id,
+                "kind": item.kind,
+                "from": {
+                    "lon": item.from_.lon,
+                    "lat": item.from_.lat,
+                },
+                "to": {
+                    "lon": item.to.lon,
+                    "lat": item.to.lat,
+                },
             }
-            for line in request.lines
+            for item in request.block_segments
         ],
-        "station_lines": [
+        "banned_stations": [
             {
-                "station_id": station_line.station_id,
-                "line_id": station_line.line_id,
-                "seq": station_line.seq,
+                "id": item.id,
+                "name": item.name,
+                "lon": item.lon,
+                "lat": item.lat,
             }
-            for station_line in sorted(request.station_lines, key=lambda item: (item.line_id, item.seq, item.station_id))
+            for item in request.banned_stations
         ],
-        "segments": segments,
-        "transfers": transfers,
-        "metadata": {
-            "source_kind": "builder",
-        },
     }
+
+
+def _admin_scenario_response(scenarios: dict, network=None) -> dict:
+    network = network or get_subway_network()
+    gis_payload = _build_gis_payload_for_network(network, include_walk_network=False)
+    effects = build_admin_scenario_effects(network, gis_payload, scenarios)
+    return {
+        "scenarios": scenarios,
+        "effects": effects,
+    }
+
+
+def _start_station_attempt_payload(
+    walk_result,
+    status: str,
+    reason: str | None = None,
+) -> dict:
+    payload = {
+        "station_id": walk_result.station_id,
+        "distance_m": round(walk_result.distance_m, 1),
+        "access_point_name": walk_result.access_point_name,
+        "status": status,
+    }
+    if reason:
+        payload["reason"] = reason
+    return payload
+
+
+def _select_walk_candidate(
+    candidates,
+    allowed_station_ids: set[str],
+    disallowed_station_ids: set[str],
+    disallowed_reason: str,
+):
+    attempts: list[dict] = []
+    for candidate in candidates:
+        if candidate.station_id not in allowed_station_ids:
+            attempts.append(
+                _start_station_attempt_payload(
+                    candidate,
+                    status="rejected",
+                    reason="station_unavailable_under_current_incidents",
+                )
+            )
+            continue
+        if candidate.station_id in disallowed_station_ids:
+            attempts.append(
+                _start_station_attempt_payload(
+                    candidate,
+                    status="rejected",
+                    reason=disallowed_reason,
+                )
+            )
+            continue
+
+        attempts.append(
+            _start_station_attempt_payload(
+                candidate,
+                status="selected",
+            )
+        )
+        return candidate, attempts
+
+    return None, attempts
 
 
 @router.get("/network")
 async def get_network():
     _raise_legacy_api_removed()
+
+
+@router.get("/admin/scenarios")
+async def get_admin_scenarios():
+    scenarios = load_admin_scenarios(settings.admin_scenarios_file)
+    return _admin_scenario_response(scenarios)
+
+
+@router.put("/admin/scenarios")
+async def save_admin_scenarios(request: AdminScenarioSaveRequest):
+    scenarios = save_admin_scenarios_in_store(
+        settings.admin_scenarios_file,
+        _serialize_admin_scenarios(request),
+    )
+    return _admin_scenario_response(scenarios)
+
+
+@router.delete("/admin/scenarios")
+async def reset_admin_scenarios():
+    scenarios = save_admin_scenarios_in_store(
+        settings.admin_scenarios_file,
+        default_admin_scenarios(),
+    )
+    return _admin_scenario_response(scenarios)
 
 
 @router.get("/gis/network")
@@ -423,25 +487,28 @@ async def get_gis_route_for_points(request: GisPointRouteRequest):
         raise HTTPException(status_code=400, detail="walking_m_per_sec must be > 0")
 
     network = get_subway_network()
+    gis_payload = _build_gis_payload_for_network(network, include_walk_network=False)
+    scenarios = load_admin_scenarios(settings.admin_scenarios_file)
+    admin_effects = build_admin_scenario_effects(network, gis_payload, scenarios)
+    network_for_route = apply_admin_scenarios_to_network(network, admin_effects)
+    route_available_station_ids = set(network_for_route.stations)
+    rain_station_ids = set(admin_effects.get("rain_station_ids", []))
+
     for via_station_id in request.via_station_ids:
         if via_station_id not in network.stations:
             raise HTTPException(status_code=400, detail=f"Unknown via station: {via_station_id}")
+        if via_station_id not in network_for_route.stations:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Via station is unavailable under current admin scenarios: {via_station_id}",
+            )
 
-    fallback_bounds = (
-        settings.fallback_min_lon,
-        settings.fallback_min_lat,
-        settings.fallback_max_lon,
-        settings.fallback_max_lat,
-    )
-    gis_payload = build_gis_payload(
-        network=network,
-        qgis_geojson_dir=settings.qgis_geojson_dir,
-        map_width=settings.map_width,
-        map_height=settings.map_height,
-        fallback_bounds=fallback_bounds,
-        include_walk_network=False,
-    )
-    station_coords_by_id = extract_station_coordinates(gis_payload["stations"])
+    station_coords_by_id = {
+        station_id: coordinate
+        for station_id, coordinate in extract_station_coordinates(gis_payload["stations"]).items()
+        if station_id in network_for_route.stations
+    }
+    all_station_coords_by_id = extract_station_coordinates(gis_payload["stations"])
     if not station_coords_by_id:
         raise HTTPException(status_code=500, detail="GIS station coordinates are unavailable")
 
@@ -451,42 +518,97 @@ async def get_gis_route_for_points(request: GisPointRouteRequest):
             if gis_payload.get("walk_network") is not None
             else get_cached_walk_graph(settings.qgis_geojson_dir)
         )
-        start_walk_result = find_nearest_station_by_walk(
+        start_walk_candidates = find_candidate_stations_by_walk(
             request.start_lon,
             request.start_lat,
-            station_coords_by_id,
+            all_station_coords_by_id,
             gis_payload.get("station_access_points"),
             None,
             walk_graph=walk_graph,
         )
-        end_walk_result = find_nearest_station_by_walk(
+        end_walk_candidates = find_candidate_stations_by_walk(
             request.end_lon,
             request.end_lat,
-            station_coords_by_id,
+            all_station_coords_by_id,
             gis_payload.get("station_access_points"),
             None,
             walk_graph=walk_graph,
         )
-        selected_start_station_id = start_walk_result.station_id
+        end_walk_result, end_station_attempts = _select_walk_candidate(
+            end_walk_candidates,
+            route_available_station_ids,
+            rain_station_ids,
+            "station_in_rain_zone",
+        )
+        if end_walk_result is None:
+            raise ValueError("No destination station is available outside the current rain zone and incident set")
         selected_end_station_id = end_walk_result.station_id
-        access_walk_distance_m = start_walk_result.distance_m
         egress_walk_distance_m = end_walk_result.distance_m
 
-        engine = get_route_engine()
-        route_result = engine.find_route_through_stations(
-            [
-                selected_start_station_id,
-                *request.via_station_ids,
-                selected_end_station_id,
-            ]
-        )
+        engine = get_route_engine() if not admin_effects["has_active_incidents"] else RouteEngine(network_for_route)
+        start_walk_result = None
+        route_result = None
+        start_station_attempts: list[dict] = []
+        for candidate in start_walk_candidates:
+            if candidate.station_id not in route_available_station_ids:
+                start_station_attempts.append(
+                    _start_station_attempt_payload(
+                        candidate,
+                        status="rejected",
+                        reason="station_unavailable_under_current_incidents",
+                    )
+                )
+                continue
+            if candidate.station_id in rain_station_ids:
+                start_station_attempts.append(
+                    _start_station_attempt_payload(
+                        candidate,
+                        status="rejected",
+                        reason="station_in_rain_zone",
+                    )
+                )
+                continue
+
+            try:
+                candidate_route_result = engine.find_route_through_stations(
+                    [
+                        candidate.station_id,
+                        *request.via_station_ids,
+                        selected_end_station_id,
+                    ]
+                )
+            except ValueError:
+                start_station_attempts.append(
+                    _start_station_attempt_payload(
+                        candidate,
+                        status="rejected",
+                        reason="no_route_to_selected_destination_station",
+                    )
+                )
+                continue
+
+            start_walk_result = candidate
+            route_result = candidate_route_result
+            start_station_attempts.append(
+                _start_station_attempt_payload(
+                    candidate,
+                    status="selected",
+                )
+            )
+            break
+
+        if start_walk_result is None or route_result is None:
+            raise ValueError("No route found from any nearby start station to the selected destination station")
+
+        selected_start_station_id = start_walk_result.station_id
+        access_walk_distance_m = start_walk_result.distance_m
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
     access_walk_time_sec = walking_time_sec(access_walk_distance_m, request.walking_m_per_sec)
     egress_walk_time_sec = walking_time_sec(egress_walk_distance_m, request.walking_m_per_sec)
-    station_lookup = _station_lookup_payload()
-    route_payload = _enrich_route_payload(route_result.to_dict(), station_lookup, network)
+    station_lookup = _station_lookup_payload_for_network(network_for_route)
+    route_payload = _enrich_route_payload(route_result.to_dict(), station_lookup, network_for_route)
     ride_path_features = build_ride_path_features(
         route_steps=route_payload.get("steps", []),
         station_coords_by_id=station_coords_by_id,
@@ -548,6 +670,9 @@ async def get_gis_route_for_points(request: GisPointRouteRequest):
         "total_journey_time_sec": (
             route_payload["total_time_sec"] + access_walk_time_sec + egress_walk_time_sec
         ),
+        "admin_effects": admin_effects,
+        "start_station_attempts": start_station_attempts,
+        "end_station_attempts": end_station_attempts,
         "route": route_payload,
     }
 

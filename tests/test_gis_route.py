@@ -9,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.services import walk_network as walk_network_module
 from app.services.gis_route import build_walk_graph
+from app.services.gis_route import find_candidate_stations_by_walk
 from app.services.gis_route import extract_station_coordinates
 from app.services.gis_route import find_nearest_station_by_walk
 
@@ -303,6 +304,54 @@ class GisWalkRoutingTests(unittest.TestCase):
         self.assertEqual(result.station_id, "station-a")
         self.assertEqual(result.access_point_name, "A Exit")
         self.assertEqual(result.path_coordinates, [(0.0, 0.0), (0.0, 1.0), (0.0, 2.0)])
+
+    def test_find_candidate_stations_by_walk_returns_results_sorted_by_distance(self):
+        walk_network = _feature_collection(
+            [
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [0.0, 0.0],
+                            [1.0, 0.0],
+                            [2.0, 0.0],
+                        ],
+                    },
+                    "properties": {},
+                }
+            ]
+        )
+        station_coords_by_id = {
+            "station-a": (2.0, 0.0),
+            "station-b": (1.0, 0.0),
+        }
+        access_points = _feature_collection(
+            [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [2.0, 0.0]},
+                    "properties": {"station_id": "station-a", "name": "A Exit"},
+                },
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [1.0, 0.0]},
+                    "properties": {"station_id": "station-b", "name": "B Exit"},
+                },
+            ]
+        )
+
+        results = find_candidate_stations_by_walk(
+            lon=0.0,
+            lat=0.0,
+            station_coords_by_id=station_coords_by_id,
+            station_access_points_geojson=access_points,
+            walk_network_geojson=walk_network,
+            walk_graph=build_walk_graph(walk_network),
+        )
+
+        self.assertEqual([item.station_id for item in results], ["station-b", "station-a"])
+        self.assertLess(results[0].distance_m, results[1].distance_m)
 
 
 if __name__ == "__main__":

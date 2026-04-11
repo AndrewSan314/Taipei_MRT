@@ -4,6 +4,7 @@ import math
 from typing import Any
 
 from app.services.walk_network import build_walk_graph
+from app.services.walk_network import find_candidate_stations_by_walk
 from app.services.walk_network import find_nearest_station_by_walk
 
 
@@ -23,28 +24,6 @@ def extract_station_coordinates(stations_geojson: dict[str, Any]) -> dict[str, t
             continue
         lookup[str(station_id)] = (float(coordinates[0]), float(coordinates[1]))
     return lookup
-
-
-def nearest_station(
-    lon: float,
-    lat: float,
-    station_coords_by_id: dict[str, tuple[float, float]],
-) -> tuple[str, float]:
-    if not station_coords_by_id:
-        raise ValueError("No GIS stations available")
-
-    best_station_id: str | None = None
-    best_distance_m = float("inf")
-
-    for station_id, (station_lon, station_lat) in station_coords_by_id.items():
-        distance_m = haversine_distance_m(lat, lon, station_lat, station_lon)
-        if distance_m < best_distance_m:
-            best_distance_m = distance_m
-            best_station_id = station_id
-
-    if best_station_id is None:
-        raise ValueError("No nearest station found")
-    return best_station_id, best_distance_m
 
 
 def haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

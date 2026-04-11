@@ -12,6 +12,7 @@ DEFAULT_POSITION_FILE = (
 )
 DEFAULT_OSM_ENRICHMENT_FILE = PROJECT_ROOT / "app" / "data" / "subway_osm_enrichment.json"
 DEFAULT_GIS_MBTILES_FILE = PROJECT_ROOT / "OUTPUT_FILE.mbtiles"
+DEFAULT_ADMIN_SCENARIOS_FILE = PROJECT_ROOT / "app" / "data" / "admin_scenarios.json"
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -62,6 +63,9 @@ class Settings:
     )
     gis_mbtiles_file: Path = Path(
         os.getenv("SUBWAY_GIS_MBTILES_FILE", str(DEFAULT_GIS_MBTILES_FILE))
+    )
+    admin_scenarios_file: Path = Path(
+        os.getenv("SUBWAY_ADMIN_SCENARIOS_FILE", str(DEFAULT_ADMIN_SCENARIOS_FILE))
     )
     fallback_min_lon: float = float(os.getenv("SUBWAY_FALLBACK_MIN_LON", "121.36"))
     fallback_min_lat: float = float(os.getenv("SUBWAY_FALLBACK_MIN_LAT", "24.90"))

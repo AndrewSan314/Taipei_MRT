@@ -1,5 +1,9 @@
-const STORAGE_KEY = 'mrt-admin-session-v3';
 const FEED_LIMIT = 7;
+const DEFAULT_VIEWPORT_BOUNDS = [121.44, 24.97, 121.62, 25.13];
+const MAX_FOCUS_LON_SPAN = 0.22;
+const MAX_FOCUS_LAT_SPAN = 0.16;
+const MIN_FOCUS_LON_SPAN = 0.12;
+const MIN_FOCUS_LAT_SPAN = 0.09;
 const MAP_SOURCE_IDS = {
   basemapLines: 'admin-metro-lines',
   basemapStations: 'admin-metro-stations',
@@ -72,10 +76,11 @@ async function init() {
     state.mapBounds = state.gis.basemap?.bounds || state.gis.bounds || state.mapBounds;
 
     buildStationCoordinateLookup();
-    hydrateSession();
+    await hydrateScenarioState();
     bindEvents();
     initBannedStationSelector();
     applyHydratedSelections();
+    applyModeUi();
     renderActivityFeed();
     initializeMap();
     render();
@@ -89,6 +94,84 @@ async function init() {
     console.error(error);
     setStatus(`Initialization error: ${error.message}`);
     elements.rulesSummary.textContent = JSON.stringify({ error: error.message }, null, 2);
+  }
+}
+
+async function hydrateScenarioState() {
+  try {
+    const response = await fetch('/api/admin/scenarios');
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.detail || 'Failed to load admin scenarios.');
+    }
+    applyScenarioPayload(payload?.scenarios || {});
+  } catch (error) {
+    console.warn('Unable to restore admin scenarios from server', error);
+    applyScenarioPayload({});
+  }
+}
+
+function applyScenarioPayload(payload) {
+  state.mode = payload?.ui_mode === 'block' ? 'block' : 'rain';
+  state.rainZones = Array.isArray(payload?.rain_zones)
+    ? payload.rain_zones
+        .map((zone) => ({
+          center: {
+            lon: Number(zone.center?.lon),
+            lat: Number(zone.center?.lat),
+          },
+          radius_m: Number(zone.radius_m || 0),
+        }))
+        .filter((zone) => Number.isFinite(zone.center.lon) && Number.isFinite(zone.center.lat))
+    : [];
+
+  state.blockSegments = Array.isArray(payload?.block_segments)
+    ? payload.block_segments
+        .map((segment) => ({
+          kind: segment.kind === 'point' ? 'point' : 'line',
+          from: {
+            lon: Number(segment.from?.lon),
+            lat: Number(segment.from?.lat),
+          },
+          to: {
+            lon: Number(segment.to?.lon),
+            lat: Number(segment.to?.lat),
+          },
+        }))
+        .filter(
+          (segment) =>
+            Number.isFinite(segment.from.lon) &&
+            Number.isFinite(segment.from.lat) &&
+            Number.isFinite(segment.to.lon) &&
+            Number.isFinite(segment.to.lat)
+        )
+    : [];
+
+  state.bannedStationIds = new Set(
+    Array.isArray(payload?.banned_stations) ? payload.banned_stations.map((item) => item.id) : []
+  );
+}
+
+async function saveScenarioState() {
+  const payload = buildPayloadPreview();
+  try {
+    const response = await fetch('/api/admin/scenarios', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    const responsePayload = await response.json();
+    if (!response.ok) {
+      throw new Error(responsePayload?.detail || 'Failed to save admin scenarios.');
+    }
+    applyScenarioPayload(responsePayload?.scenarios || payload);
+    renderMetrics();
+    updateRulesSummary();
+  } catch (error) {
+    console.error(error);
+    setStatus(`Save failed: ${error.message}`);
   }
 }
 
@@ -448,11 +531,109 @@ function buildStationCoordinateLookup() {
   });
 }
 
+function computeFeatureBounds(featureCollection) {
+  const features = featureCollection?.features;
+  if (!Array.isArray(features) || !features.length) {
+    return null;
+  }
+
+  let minLon = Infinity;
+  let minLat = Infinity;
+  let maxLon = -Infinity;
+  let maxLat = -Infinity;
+
+  features.forEach((feature) => {
+    const coordinates = feature?.geometry?.coordinates;
+    if (!Array.isArray(coordinates) || coordinates.length < 2) {
+      return;
+    }
+    const [lon, lat] = coordinates;
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+      return;
+    }
+    minLon = Math.min(minLon, lon);
+    minLat = Math.min(minLat, lat);
+    maxLon = Math.max(maxLon, lon);
+    maxLat = Math.max(maxLat, lat);
+  });
+
+  if (!Number.isFinite(minLon)) {
+    return null;
+  }
+  return [minLon, minLat, maxLon, maxLat];
+}
+
+function clampBounds(innerBounds, outerBounds) {
+  if (!Array.isArray(innerBounds) || !Array.isArray(outerBounds)) {
+    return innerBounds;
+  }
+
+  const [outerMinLon, outerMinLat, outerMaxLon, outerMaxLat] = outerBounds;
+  const width = innerBounds[2] - innerBounds[0];
+  const height = innerBounds[3] - innerBounds[1];
+  const clampedMinLon = Math.min(Math.max(innerBounds[0], outerMinLon), outerMaxLon - width);
+  const clampedMinLat = Math.min(Math.max(innerBounds[1], outerMinLat), outerMaxLat - height);
+  return [
+    clampedMinLon,
+    clampedMinLat,
+    clampedMinLon + width,
+    clampedMinLat + height,
+  ];
+}
+
+function expandBounds(bounds, ratio) {
+  const width = bounds[2] - bounds[0];
+  const height = bounds[3] - bounds[1];
+  const padLon = width * ratio;
+  const padLat = height * ratio;
+  return [
+    bounds[0] - padLon,
+    bounds[1] - padLat,
+    bounds[2] + padLon,
+    bounds[3] + padLat,
+  ];
+}
+
+function resolveViewportBounds() {
+  const stationBounds = computeFeatureBounds(state.gis?.stations);
+  const outerBounds = state.gis?.basemap?.bounds || state.gis?.bounds || DEFAULT_VIEWPORT_BOUNDS;
+  if (!stationBounds) {
+    return DEFAULT_VIEWPORT_BOUNDS;
+  }
+
+  const centerLon = (stationBounds[0] + stationBounds[2]) / 2;
+  const centerLat = (stationBounds[1] + stationBounds[3]) / 2;
+  const lonSpan = Math.min(
+    Math.max((stationBounds[2] - stationBounds[0]) * 0.72, MIN_FOCUS_LON_SPAN),
+    MAX_FOCUS_LON_SPAN,
+  );
+  const latSpan = Math.min(
+    Math.max((stationBounds[3] - stationBounds[1]) * 0.72, MIN_FOCUS_LAT_SPAN),
+    MAX_FOCUS_LAT_SPAN,
+  );
+
+  return clampBounds(
+    [
+      centerLon - lonSpan / 2,
+      centerLat - latSpan / 2,
+      centerLon + lonSpan / 2,
+      centerLat + latSpan / 2,
+    ],
+    outerBounds,
+  );
+}
+
+function resolvePanBounds() {
+  const viewportBounds = resolveViewportBounds();
+  const outerBounds = state.gis?.basemap?.bounds || state.gis?.bounds || DEFAULT_VIEWPORT_BOUNDS;
+  return clampBounds(expandBounds(viewportBounds, 0.18), outerBounds);
+}
+
 function resetMapView() {
   if (!state.map) {
     return;
   }
-  const bounds = state.mapBounds;
+  const bounds = resolveViewportBounds();
   state.map.fitBounds(
     [
       [bounds[0], bounds[1]],
@@ -466,23 +647,17 @@ function applyMapBoundsConstraint() {
   if (!state.map) {
     return;
   }
-  const bounds = state.mapBounds;
+  const bounds = resolvePanBounds();
   state.map.setMaxBounds([
-    [bounds[0] - 0.04, bounds[1] - 0.04],
-    [bounds[2] + 0.04, bounds[3] + 0.04],
+    [bounds[0], bounds[1]],
+    [bounds[2], bounds[3]],
   ]);
 }
 
-function setMode(mode) {
+async function setMode(mode) {
   state.mode = mode;
   state.temporaryPoint = null;
-  elements.modeRain.classList.toggle('active', mode === 'rain');
-  elements.modeBlock.classList.toggle('active', mode === 'block');
-  elements.modeLabel.textContent = mode === 'rain' ? 'Rain Zone' : 'Block Segment';
-  elements.modeHint.textContent =
-    mode === 'rain'
-      ? 'Create an affected area with 2 map clicks'
-      : 'Create a blocked line or a blocked point';
+  applyModeUi();
   setStatus(
     mode === 'rain'
       ? 'Rain mode is active. Click center first, then click again to set radius.'
@@ -490,9 +665,20 @@ function setMode(mode) {
   );
   updateMapSources();
   updateMapHelper();
+  await saveScenarioState();
 }
 
-function handleMapClick(point) {
+function applyModeUi() {
+  elements.modeRain.classList.toggle('active', state.mode === 'rain');
+  elements.modeBlock.classList.toggle('active', state.mode === 'block');
+  elements.modeLabel.textContent = state.mode === 'rain' ? 'Rain Zone' : 'Block Segment';
+  elements.modeHint.textContent =
+    state.mode === 'rain'
+      ? 'Create an affected area with 2 map clicks'
+      : 'Create a blocked line or a blocked point';
+}
+
+async function handleMapClick(point) {
   if (state.mode === 'rain') {
     if (!state.temporaryPoint) {
       state.temporaryPoint = point;
@@ -501,7 +687,7 @@ function handleMapClick(point) {
       updateMapHelper();
       return;
     }
-    addRainZone(state.temporaryPoint, point);
+    await addRainZone(state.temporaryPoint, point);
     return;
   }
 
@@ -520,14 +706,14 @@ function handleMapClick(point) {
     point.lon
   );
   if (distanceM < 70) {
-    addBlockPoint(point);
+    await addBlockPoint(point);
     return;
   }
 
-  addBlockSegment(state.temporaryPoint, point);
+  await addBlockSegment(state.temporaryPoint, point);
 }
 
-function addRainZone(centerPoint, edgePoint) {
+async function addRainZone(centerPoint, edgePoint) {
   const radiusM = haversineDistanceM(centerPoint.lat, centerPoint.lon, edgePoint.lat, edgePoint.lon);
   state.rainZones.push({
     center: centerPoint,
@@ -540,9 +726,10 @@ function addRainZone(centerPoint, edgePoint) {
   );
   setStatus('A new rain zone was added to the GIS map.');
   render();
+  await saveScenarioState();
 }
 
-function addBlockSegment(fromPoint, toPoint) {
+async function addBlockSegment(fromPoint, toPoint) {
   state.blockSegments.push({
     kind: 'line',
     from: fromPoint,
@@ -555,9 +742,10 @@ function addBlockSegment(fromPoint, toPoint) {
   );
   setStatus('A new blocked segment was added.');
   render();
+  await saveScenarioState();
 }
 
-function addBlockPoint(point) {
+async function addBlockPoint(point) {
   state.blockSegments.push({
     kind: 'point',
     from: point,
@@ -567,15 +755,17 @@ function addBlockPoint(point) {
   addFeed('Blocked point added', formatLonLat(point));
   setStatus('A blocked point was added.');
   render();
+  await saveScenarioState();
 }
 
-function setBannedStations(stationIds) {
+async function setBannedStations(stationIds) {
   state.bannedStationIds = new Set(stationIds);
   addFeed('Banned stations updated', `${state.bannedStationIds.size} stations are blocked.`);
   render();
+  await saveScenarioState();
 }
 
-function resetAll() {
+async function resetAll() {
   state.rainZones = [];
   state.blockSegments = [];
   state.temporaryPoint = null;
@@ -586,6 +776,11 @@ function resetAll() {
   addFeed('Rules cleared', 'Rain zones, blocked segments, and banned stations were reset.');
   setStatus('All admin rules were cleared.');
   render();
+  try {
+    await fetch('/api/admin/scenarios', { method: 'DELETE' });
+  } catch (error) {
+    console.error(error);
+  }
 }
 
 function render() {
@@ -804,7 +999,6 @@ function buildPayloadPreview() {
 function updateRulesSummary() {
   const payload = buildPayloadPreview();
   elements.rulesSummary.textContent = JSON.stringify(payload, null, 2);
-  persistSession(payload);
 }
 
 function renderActivityFeed() {
@@ -856,64 +1050,6 @@ function initBannedStationSelector() {
 function applyHydratedSelections() {
   for (const option of elements.bannedStations.options) {
     option.selected = state.bannedStationIds.has(option.value);
-  }
-}
-
-function hydrateSession() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return;
-    }
-
-    const saved = JSON.parse(raw);
-    state.rainZones = Array.isArray(saved.rain_zones)
-      ? saved.rain_zones
-          .map((zone) => ({
-            center: {
-              lon: Number(zone.center?.lon),
-              lat: Number(zone.center?.lat),
-            },
-            radius_m: Number(zone.radius_m || 0),
-          }))
-          .filter((zone) => Number.isFinite(zone.center.lon) && Number.isFinite(zone.center.lat))
-      : [];
-
-    state.blockSegments = Array.isArray(saved.block_segments)
-      ? saved.block_segments
-          .map((segment) => ({
-            kind: segment.kind === 'point' ? 'point' : 'line',
-            from: {
-              lon: Number(segment.from?.lon),
-              lat: Number(segment.from?.lat),
-            },
-            to: {
-              lon: Number(segment.to?.lon),
-              lat: Number(segment.to?.lat),
-            },
-          }))
-          .filter(
-            (segment) =>
-              Number.isFinite(segment.from.lon) &&
-              Number.isFinite(segment.from.lat) &&
-              Number.isFinite(segment.to.lon) &&
-              Number.isFinite(segment.to.lat)
-          )
-      : [];
-
-    state.bannedStationIds = new Set(
-      Array.isArray(saved.banned_stations) ? saved.banned_stations.map((item) => item.id) : []
-    );
-  } catch (error) {
-    console.warn('Unable to restore admin GIS session', error);
-  }
-}
-
-function persistSession(payload) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  } catch (error) {
-    console.warn('Unable to persist admin GIS session', error);
   }
 }
 

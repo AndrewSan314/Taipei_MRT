@@ -38,6 +38,24 @@ const SOURCE_IDS = {
   route: "route-lines",
 };
 const SIDEBAR_TRANSITION_MS = 280;
+const DEFAULT_VIEWPORT_BOUNDS = [121.44, 24.97, 121.62, 25.13];
+const MAX_FOCUS_LON_SPAN = 0.22;
+const MAX_FOCUS_LAT_SPAN = 0.16;
+const MIN_FOCUS_LON_SPAN = 0.12;
+const MIN_FOCUS_LAT_SPAN = 0.09;
+const ROUTE_WALK_COLOR = "#0f766e";
+const ROUTE_SELECTED_MAIN_COLOR = "#58DE1B";
+const ROUTE_SELECTED_GLOW_COLOR = "rgba(88, 222, 27, 0.42)";
+const ROUTE_SELECTED_CORE_COLOR = "#d8f8c6";
+const VIA_STATION_COLOR = "#d97706";
+const VIA_STATION_TEXT_COLOR = "#7a4d00";
+const PICKED_POINT_COLOR_MATCH = [
+  "match",
+  ["get", "role"],
+  "start_point",
+  "#16a34a",
+  "#dc2626",
+];
 
 async function init() {
   if (!window.maplibregl) {
@@ -124,6 +142,104 @@ function buildStationCoordinateLookup() {
     }
     state.stationCoordsById.set(stationId, [Number(coordinates[0]), Number(coordinates[1])]);
   });
+}
+
+function computeFeatureBounds(featureCollection) {
+  const features = featureCollection?.features;
+  if (!Array.isArray(features) || !features.length) {
+    return null;
+  }
+
+  let minLon = Infinity;
+  let minLat = Infinity;
+  let maxLon = -Infinity;
+  let maxLat = -Infinity;
+
+  features.forEach((feature) => {
+    const coordinates = feature?.geometry?.coordinates;
+    if (!Array.isArray(coordinates) || coordinates.length < 2) {
+      return;
+    }
+    const [lon, lat] = coordinates;
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+      return;
+    }
+    minLon = Math.min(minLon, lon);
+    minLat = Math.min(minLat, lat);
+    maxLon = Math.max(maxLon, lon);
+    maxLat = Math.max(maxLat, lat);
+  });
+
+  if (!Number.isFinite(minLon)) {
+    return null;
+  }
+  return [minLon, minLat, maxLon, maxLat];
+}
+
+function clampBounds(innerBounds, outerBounds) {
+  if (!Array.isArray(innerBounds) || !Array.isArray(outerBounds)) {
+    return innerBounds;
+  }
+
+  const [outerMinLon, outerMinLat, outerMaxLon, outerMaxLat] = outerBounds;
+  const width = innerBounds[2] - innerBounds[0];
+  const height = innerBounds[3] - innerBounds[1];
+  const clampedMinLon = Math.min(Math.max(innerBounds[0], outerMinLon), outerMaxLon - width);
+  const clampedMinLat = Math.min(Math.max(innerBounds[1], outerMinLat), outerMaxLat - height);
+  return [
+    clampedMinLon,
+    clampedMinLat,
+    clampedMinLon + width,
+    clampedMinLat + height,
+  ];
+}
+
+function expandBounds(bounds, ratio) {
+  const width = bounds[2] - bounds[0];
+  const height = bounds[3] - bounds[1];
+  const padLon = width * ratio;
+  const padLat = height * ratio;
+  return [
+    bounds[0] - padLon,
+    bounds[1] - padLat,
+    bounds[2] + padLon,
+    bounds[3] + padLat,
+  ];
+}
+
+function resolveViewportBounds() {
+  const stationBounds = computeFeatureBounds(state.gis?.stations);
+  const outerBounds = state.gis?.basemap?.bounds || state.gis?.bounds || DEFAULT_VIEWPORT_BOUNDS;
+  if (!stationBounds) {
+    return DEFAULT_VIEWPORT_BOUNDS;
+  }
+
+  const centerLon = (stationBounds[0] + stationBounds[2]) / 2;
+  const centerLat = (stationBounds[1] + stationBounds[3]) / 2;
+  const lonSpan = Math.min(
+    Math.max((stationBounds[2] - stationBounds[0]) * 0.72, MIN_FOCUS_LON_SPAN),
+    MAX_FOCUS_LON_SPAN,
+  );
+  const latSpan = Math.min(
+    Math.max((stationBounds[3] - stationBounds[1]) * 0.72, MIN_FOCUS_LAT_SPAN),
+    MAX_FOCUS_LAT_SPAN,
+  );
+
+  return clampBounds(
+    [
+      centerLon - lonSpan / 2,
+      centerLat - latSpan / 2,
+      centerLon + lonSpan / 2,
+      centerLat + latSpan / 2,
+    ],
+    outerBounds,
+  );
+}
+
+function resolvePanBounds() {
+  const viewportBounds = resolveViewportBounds();
+  const outerBounds = state.gis?.basemap?.bounds || state.gis?.bounds || DEFAULT_VIEWPORT_BOUNDS;
+  return clampBounds(expandBounds(viewportBounds, 0.18), outerBounds);
 }
 
 function bindEvents() {
@@ -251,6 +367,7 @@ function handleMapLoad() {
     id: "route-lines-halo",
     type: "line",
     source: SOURCE_IDS.route,
+    filter: ["==", ["get", "kind"], "ride"],
     layout: {
       "line-cap": "round",
       "line-join": "round",
@@ -258,7 +375,7 @@ function handleMapLoad() {
     paint: {
       "line-color": "rgba(255,255,255,0.96)",
       "line-width": ["interpolate", ["linear"], ["zoom"], 9, 7, 13, 12],
-      "line-opacity": 0.78,
+      "line-opacity": 0.82,
     },
   });
 
@@ -272,10 +389,58 @@ function handleMapLoad() {
       "line-join": "round",
     },
     paint: {
-      "line-color": "#145ef2",
-      "line-width": ["interpolate", ["linear"], ["zoom"], 9, 4.2, 13, 8.4],
-      "line-opacity": 0.98,
-      "line-dasharray": [1, 0],
+      "line-color": ROUTE_SELECTED_MAIN_COLOR,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 9, 4.8, 13, 9.1],
+      "line-opacity": 1,
+    },
+  });
+
+  state.map.addLayer({
+    id: "route-lines-ride-highlight",
+    type: "line",
+    source: SOURCE_IDS.route,
+    filter: ["==", ["get", "kind"], "ride"],
+    layout: {
+      "line-cap": "round",
+      "line-join": "round",
+    },
+    paint: {
+      "line-color": ROUTE_SELECTED_GLOW_COLOR,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 9, 6.2, 13, 11.4],
+      "line-opacity": 0.9,
+    },
+  });
+
+  state.map.addLayer({
+    id: "route-lines-ride-core",
+    type: "line",
+    source: SOURCE_IDS.route,
+    filter: ["==", ["get", "kind"], "ride"],
+    layout: {
+      "line-cap": "round",
+      "line-join": "round",
+    },
+    paint: {
+      "line-color": ROUTE_SELECTED_CORE_COLOR,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 9, 0.85, 13, 1.8],
+      "line-opacity": 0.9,
+    },
+  });
+
+  state.map.addLayer({
+    id: "route-lines-walk-halo",
+    type: "line",
+    source: SOURCE_IDS.route,
+    filter: ["==", ["get", "kind"], "walk"],
+    layout: {
+      "line-cap": "round",
+      "line-join": "round",
+    },
+    paint: {
+      "line-color": "rgba(255,255,255,0.96)",
+      "line-width": ["interpolate", ["linear"], ["zoom"], 9, 4.4, 13, 8.2],
+      "line-opacity": 0.72,
+      "line-dasharray": [0.9, 1.35],
     },
   });
 
@@ -289,9 +454,10 @@ function handleMapLoad() {
       "line-join": "round",
     },
     paint: {
-      "line-color": "#1f9d67",
-      "line-width": ["interpolate", ["linear"], ["zoom"], 9, 4.2, 13, 7.8],
-      "line-opacity": 0.96,
+      "line-color": ROUTE_WALK_COLOR,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 9, 2.8, 13, 5.8],
+      "line-opacity": 0.94,
+      "line-dasharray": [0.9, 1.35],
     },
   });
 
@@ -313,19 +479,24 @@ function handleMapLoad() {
     type: "circle",
     source: SOURCE_IDS.selectedStations,
     paint: {
-      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 5.2, 13, 9.8],
-      "circle-color": [
-        "match",
-        ["get", "role"],
-        "start_station",
-        "#2ca56d",
-        "end_station",
-        "#dd5a4f",
-        "#e6a91a",
-      ],
-      "circle-stroke-color": "#0f172a",
-      "circle-stroke-width": 2.1,
-      "circle-opacity": 0.96,
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 5.8, 13, 10.8],
+      "circle-color": "#ffffff",
+      "circle-stroke-color": VIA_STATION_COLOR,
+      "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 9, 2.4, 13, 3.2],
+      "circle-opacity": 0.98,
+    },
+  });
+
+  state.map.addLayer({
+    id: "selected-stations-core",
+    type: "circle",
+    source: SOURCE_IDS.selectedStations,
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 2.4, 13, 4.8],
+      "circle-color": VIA_STATION_COLOR,
+      "circle-stroke-color": "#ffffff",
+      "circle-stroke-width": 1.2,
+      "circle-opacity": 1,
     },
   });
 
@@ -337,23 +508,15 @@ function handleMapLoad() {
       "text-field": ["get", "name"],
       "text-font": ["Noto Sans Bold"],
       "text-size": ["interpolate", ["linear"], ["zoom"], 10, 11, 14, 15],
-      "text-offset": [0.9, -0.75],
+      "text-offset": [0.95, -0.7],
       "text-anchor": "left",
       "text-allow-overlap": true,
       "text-ignore-placement": true,
     },
     paint: {
-      "text-color": [
-        "match",
-        ["get", "role"],
-        "start_station",
-        "#14532d",
-        "end_station",
-        "#7f1d1d",
-        "#7a4d00",
-      ],
+      "text-color": VIA_STATION_TEXT_COLOR,
       "text-halo-color": "#ffffff",
-      "text-halo-width": 1.8,
+      "text-halo-width": 2,
       "text-opacity": 1,
     },
   });
@@ -363,17 +526,24 @@ function handleMapLoad() {
     type: "circle",
     source: SOURCE_IDS.pickedPoints,
     paint: {
-      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 4.4, 13, 8],
-      "circle-color": [
-        "match",
-        ["get", "role"],
-        "start_point",
-        "#2ca56d",
-        "#dd5a4f",
-      ],
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 4.8, 13, 8.8],
+      "circle-color": "#ffffff",
+      "circle-stroke-color": PICKED_POINT_COLOR_MATCH,
+      "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 9, 2.2, 13, 3],
+      "circle-opacity": 0.98,
+    },
+  });
+
+  state.map.addLayer({
+    id: "picked-points-core",
+    type: "circle",
+    source: SOURCE_IDS.pickedPoints,
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 2.1, 13, 3.9],
+      "circle-color": PICKED_POINT_COLOR_MATCH,
       "circle-stroke-color": "#ffffff",
-      "circle-stroke-width": 2,
-      "circle-opacity": 0.95,
+      "circle-stroke-width": 1.1,
+      "circle-opacity": 1,
     },
   });
 
@@ -484,7 +654,8 @@ function handleMapLoad() {
     setStatus("Point updated. Click Find Route to calculate.");
   });
 
-  const bounds = state.gis.basemap?.bounds || state.gis.bounds || [121.45, 24.95, 121.65, 25.15];
+  const bounds = resolveViewportBounds();
+  const maxBounds = resolvePanBounds();
   state.map.fitBounds(
     [
       [bounds[0], bounds[1]],
@@ -493,8 +664,8 @@ function handleMapLoad() {
     { padding: 40, duration: 0 },
   );
   state.map.setMaxBounds([
-    [bounds[0] - 0.04, bounds[1] - 0.04],
-    [bounds[2] + 0.04, bounds[3] + 0.04],
+    [maxBounds[0], maxBounds[1]],
+    [maxBounds[2], maxBounds[3]],
   ]);
 
   updatePickedPointsSource();
@@ -748,14 +919,8 @@ function updateSelectedStationsSource() {
   }
 
   const features = [];
-  if (state.routeResult?.selected_start_station?.id) {
-    features.push(buildStationFeature(state.routeResult.selected_start_station.id, "start_station"));
-  }
-  if (state.routeResult?.selected_end_station?.id) {
-    features.push(buildStationFeature(state.routeResult.selected_end_station.id, "end_station"));
-  }
   state.viaStationIds.forEach((stationId) => {
-    features.push(buildStationFeature(stationId, "via_station"));
+    features.push(buildStationFeature(stationId));
   });
 
   source.setData({
@@ -764,7 +929,7 @@ function updateSelectedStationsSource() {
   });
 }
 
-function buildStationFeature(stationId, role) {
+function buildStationFeature(stationId) {
   const coordinates = state.stationCoordsById.get(stationId);
   if (!coordinates) {
     return null;
@@ -779,7 +944,6 @@ function buildStationFeature(stationId, role) {
     properties: {
       id: stationId,
       name: station?.name || stationId,
-      role,
     },
   };
 }
