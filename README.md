@@ -1,103 +1,70 @@
 # IT3160 Subway Web
 
-Minimal Python web app for subway routing using FastAPI and a custom Dijkstra engine on an expanded station-line graph.
+A professional Python web application for subway routing and GIS visualization. Built with **FastAPI** and a custom **Dijkstra** routing engine optimized for expanded station-line graphs.
 
-The frontend now uses:
-- `map/geography/taipei-vector-map-2022.svg` for real-map point picking
-- `map/diagram/taipei_mrt_interactive.svg` as the semantic subway diagram surface
-- `/gis` MapLibre WebGL studio for smoother pan/zoom and GIS-ready integration
+## Core Features
 
-The interactive subway SVG is generated from the MetroMapMaker export by:
+- **Interactive GIS Studio**: WebGL-powered studio for smoother pan/zoom and precise GIS-ready integration.
+- **Dijkstra Routing Engine**: Multi-modal route finding snapping points to the nearest MRT stations.
+- **Admin Scenario Management**: Real-time scenario enforcement (blocked stations, rain zones) that propagates to the routing engine.
+- **Hybrid Mapping**: Supports both semantic diagram surfaces and real-map SVG picking.
 
-```powershell
-python IT3160-SubwayWeb\scripts\map\normalize_metromapmaker_svg.py `
-  --source IT3160-SubwayWeb\map\diagram\metromapmaker-8S4w6aZ4.svg `
-  --output IT3160-SubwayWeb\map\diagram\taipei_mrt_interactive.svg `
-  --mapping IT3160-SubwayWeb\app\data\taipei_mrt_interactive_map.json
+---
+
+## Prerequisites
+
+- **Python**: 3.12 or higher.
+- **Dependencies**: 
+  ```bash
+  pip install fastapi uvicorn pydantic
+  ```
+  *(Or use the provided `pyproject.toml` for standardized dependency management)*
+
+## Getting Started
+
+### 1. Data Setup
+Ensure that the following data files are present in `app/data/`:
+- `gis/network_topology.json` (The base subway graph)
+- `station_positions_taipei_vector_map_2022.json` (Station coordinate mapping)
+- `subway_osm_enrichment.json` (Optional OSM data for transfers)
+
+### 2. Pre-build GIS Artifacts
+Before running the server, pre-build the GIS snapping cache to ensure fast routing:
+```bash
+python scripts\build_gis_runtime_cache.py
 ```
 
-## Structure
+### 3. Run the Web Server
+You can start the application using the helper scripts:
+- **Windows Command Prompt**: `start_web.bat`
+- **PowerShell**: `.\start_web.ps1`
 
-- `app/static/route-studio` contains the main demo page.
-- `app/static/calibration` contains the calibration tool.
-- `app/static/builder` contains the graph builder.
-- `app/static/gis-studio` contains the GIS WebGL studio.
-- `app/static/shared` contains shared UI shell styles.
-- `docs/architecture` stores codebase structure docs.
-- `docs/planning` stores task allocation and planning docs.
-- `scripts/map` stores map and SVG normalization scripts.
-- `map/geography` stores real-map assets.
-- `map/diagram` stores semantic diagram assets.
-
-Calibration tool:
-
-```powershell
-http://127.0.0.1:8010/calibrate
+Alternatively, run uvicorn manually:
+```bash
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8010 --reload
 ```
 
-Use it to click the exact station positions on the image and save them back into `app/data/station_positions_taipei_vector_map_2022.json`.
+---
 
-Graph builder:
+## Tools & Modules
 
-```powershell
-http://127.0.0.1:8010/builder
-```
+- **GIS Studio**: `http://127.0.0.1:8010/` (Main entry)
+- **Admin Panel**: `http://127.0.0.1:8010/admin` (Scenario management)
+- **Calibration Tool**: `http://127.0.0.1:8010/calibrate` (Click exact station positions)
+- **Graph Builder**: `http://127.0.0.1:8010/builder` (Rebuild subway graph on SVG)
 
-Use it to rebuild the subway graph directly on top of the semantic SVG diagram.
+## API Reference
 
-GIS studio:
+- `GET /api/gis/network`: Returns the complete scenario-aware subway network.
+- `POST /api/gis/route/points`: Calculates multi-modal routes for arbitrary map points.
+- `GET /api/admin/scenarios`: Retrieves currently active scenario rules.
 
-```powershell
-http://127.0.0.1:8010/gis
-```
-
-`/api/gis/network` loads QGIS exports from `app/data/gis/stations.geojson` and
-`app/data/gis/lines.geojson` when available (EPSG:4326). If missing, it falls back
-to projected coordinates from legacy pixel data.
-
-If `OUTPUT_FILE.mbtiles` exists at repo root, GIS studio uses it as the local raster
-basemap. You can override that file path with `SUBWAY_GIS_MBTILES_FILE`.
-
-GIS point routing:
-
-- User can click any two points on map (not required to click stations).
-- Backend snaps to nearest station, computes subway route, and returns access/egress walking legs.
-- Endpoint: `POST /api/gis/route/points`
-
-## Run
-
-### Option 1: from repo root
-
-```powershell
-python -m uvicorn --app-dir IT3160-SubwayWeb app.main:app --host 127.0.0.1 --port 8010
-```
-
-### Option 2: from project folder
-
-```powershell
-cd IT3160-SubwayWeb
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
-```
-
-Open `http://127.0.0.1:8010`.
-
-If you see `WinError 10048`, the port is already in use. Pick another free port, or use the helper scripts below.
-
-Helper scripts:
-
-```powershell
-.\IT3160-SubwayWeb\start_web.ps1
-```
-
-```cmd
-IT3160-SubwayWeb\start_web.bat
-```
-
-Both helper scripts start from `8010` and automatically move to the next free port if needed.
+---
 
 ## Tests
 
-```powershell
-python -m unittest IT3160-SubwayWeb.tests.test_route_engine -v
-python -m unittest IT3160-SubwayWeb.tests.test_api -v
+Run the backend test suite using:
+```bash
+python -m unittest tests.test_route_engine -v
+python -m unittest tests.test_api -v
 ```
