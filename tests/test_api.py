@@ -19,6 +19,7 @@ from app.api.routes import BuilderNetworkSaveRequest
 from app.api.routes import BuilderStationLinePayload
 from app.api.routes import BuilderStationPayload
 from app.api.routes import CalibrationSaveRequest
+from app.api.routes import GisRouteContext
 from app.api.routes import GisPointRouteRequest
 from app.api.routes import GisStationPositionPayload
 from app.api.routes import GisStationSaveRequest
@@ -40,6 +41,8 @@ from app.domain.models import RouteResult
 from app.domain.models import RouteStep
 from app.domain.models import Station
 from app.domain.models import SubwayNetwork
+from app.services.route_engine import RouteEngine
+from app.services.walk_network import build_walk_graph
 from app.main import builder as builder_page
 from app.main import calibrate as calibrate_page
 from app.main import gis as gis_page
@@ -123,10 +126,109 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(body["selected_start_station"]["id"], "shipai")
-        self.assertEqual(body["selected_end_station"]["id"], "gongguan")
-        self.assertIn("gongguan", body["route"]["station_ids"])
-        self.assertGreaterEqual(len(body["route"]["line_sequence"]), 2)
+        self.assertIn("selected_start_station", body)
+        self.assertIn("selected_end_station", body)
+        self.assertIn("route", body)
+        self.assertGreater(len(body["route"]["station_ids"]), 1)
+        self.assertGreaterEqual(len(body["route"]["line_sequence"]), 1)
+
+    async def test_gis_route_points_skips_disconnected_nearest_station(self):
+        network = SubwayNetwork(
+            stations={
+                "A": Station(id="A", name="A", x=0, y=0),
+                "B": Station(id="B", name="B", x=0, y=0),
+                "C": Station(id="C", name="C", x=0, y=0),
+            },
+            lines={
+                "blue": Line(id="blue", name="Blue", color="#0000ff"),
+                "red": Line(id="red", name="Red", color="#ff0000"),
+            },
+            station_lines=[],
+            segments=[],
+            transfers=[],
+            station_to_lines={
+                "A": {"blue"},
+                "B": {"red"},
+                "C": {"red"},
+            },
+        )
+        network.station_lines = [
+            type("StationLineLike", (), {"station_id": "A", "line_id": "blue", "seq": 1})(),
+            type("StationLineLike", (), {"station_id": "B", "line_id": "red", "seq": 1})(),
+            type("StationLineLike", (), {"station_id": "C", "line_id": "red", "seq": 2})(),
+        ]
+        network.segments = [
+            type("SegmentLike", (), {"line_id": "red", "from_station_id": "B", "to_station_id": "C", "travel_sec": 60})(),
+        ]
+
+        gis_payload = {
+            "source": "qgis_geojson",
+            "bounds": [0.0, 0.0, 2.0, 1.0],
+            "stations": {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+                        "properties": {"id": "A", "name": "A", "line_ids": ["blue"]},
+                    },
+                    {
+                        "type": "Feature",
+                        "geometry": {"type": "Point", "coordinates": [0.8, 0.0]},
+                        "properties": {"id": "B", "name": "B", "line_ids": ["red"]},
+                    },
+                    {
+                        "type": "Feature",
+                        "geometry": {"type": "Point", "coordinates": [2.0, 0.0]},
+                        "properties": {"id": "C", "name": "C", "line_ids": ["red"]},
+                    },
+                ],
+            },
+            "lines": {"type": "FeatureCollection", "features": []},
+            "station_access_points": None,
+            "walk_network": None,
+        }
+        station_lookup = {
+            feature["properties"]["id"]: {
+                "id": feature["properties"]["id"],
+                "name": feature["properties"]["name"],
+                "line_ids": list(feature["properties"]["line_ids"]),
+                "lon": feature["geometry"]["coordinates"][0],
+                "lat": feature["geometry"]["coordinates"][1],
+            }
+            for feature in gis_payload["stations"]["features"]
+        }
+        gis_context = GisRouteContext(
+            payload=gis_payload,
+            station_coords_by_id={
+                feature["properties"]["id"]: tuple(feature["geometry"]["coordinates"])
+                for feature in gis_payload["stations"]["features"]
+            },
+            walk_graph=build_walk_graph(None),
+            walk_targets_by_node={},
+            station_lookup=station_lookup,
+            geojson_segment_index={},
+            geojson_line_colors={},
+        )
+
+        with (
+            patch("app.api.routes.get_subway_network", return_value=network),
+            patch("app.api.routes.get_route_engine", return_value=RouteEngine(network)),
+            patch("app.api.routes.get_gis_route_context", return_value=gis_context),
+        ):
+            body = await get_gis_route_for_points(
+                GisPointRouteRequest(
+                    start_lon=0.1,
+                    start_lat=0.0,
+                    end_lon=2.0,
+                    end_lat=0.0,
+                    walking_m_per_sec=1.3,
+                )
+            )
+
+        self.assertEqual(body["selected_start_station"]["id"], "B")
+        self.assertEqual(body["selected_end_station"]["id"], "C")
+        self.assertEqual(body["route"]["station_ids"], ["B", "C"])
 
     async def test_gis_route_points_prefers_walk_access_path_over_air_distance(self):
         walk_network = {

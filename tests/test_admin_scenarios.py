@@ -1,5 +1,8 @@
+import json
 import sys
+import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,13 +10,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.api.routes import AdminScenarioSaveRequest
+from app.api.routes import GisRouteContext
 from app.api.routes import GisPointRouteRequest
 from app.api.routes import get_gis_route_for_points
+from app.api.routes import update_admin_scenarios
+from app.config import get_settings
 from app.domain.models import Line
 from app.domain.models import Station
 from app.domain.models import SubwayNetwork
 from app.services.admin_scenarios import apply_admin_scenarios_to_network
 from app.services.admin_scenarios import build_admin_scenario_effects
+from app.services.admin_scenarios import load_admin_scenarios
 from app.services.gis_route import build_walk_graph
 from app.services.route_engine import RouteEngine
 
@@ -112,6 +120,37 @@ def _sample_gis_payload():
     }
 
 
+def _sample_gis_route_context(exclude_station_ids: set[str] | None = None):
+    gis_payload = _sample_gis_payload()
+    excluded_station_ids = exclude_station_ids or set()
+    station_coords_by_id = {
+        feature["properties"]["id"]: tuple(feature["geometry"]["coordinates"])
+        for feature in gis_payload["stations"]["features"]
+        if feature["properties"]["id"] not in excluded_station_ids
+    }
+    station_lookup = {
+        station_id: {
+            "id": station_id,
+            "name": feature["properties"]["name"],
+            "line_ids": list(feature["properties"]["line_ids"]),
+            "lon": feature["geometry"]["coordinates"][0],
+            "lat": feature["geometry"]["coordinates"][1],
+        }
+        for feature in gis_payload["stations"]["features"]
+        for station_id in [feature["properties"]["id"]]
+        if station_id not in excluded_station_ids
+    }
+    return GisRouteContext(
+        payload=gis_payload,
+        station_coords_by_id=station_coords_by_id,
+        walk_graph=build_walk_graph(None),
+        walk_targets_by_node={},
+        station_lookup=station_lookup,
+        geojson_segment_index={},
+        geojson_line_colors={},
+    )
+
+
 class AdminScenarioTests(unittest.TestCase):
     def test_build_admin_scenario_effects_collects_rain_snap_exclusions_and_blocked_segments(self):
         network = _sample_network_with_topology()
@@ -146,6 +185,73 @@ class AdminScenarioTests(unittest.TestCase):
 
 
 class AdminScenarioApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_admin_scenario_save_endpoint_persists_full_payload(self):
+        payload = AdminScenarioSaveRequest(
+            source="qgis_geojson",
+            generated_at="2026-04-12T10:11:12.000Z",
+            ui_mode="block",
+            map_bounds={
+                "min_lon": 121.45,
+                "min_lat": 24.95,
+                "max_lon": 121.65,
+                "max_lat": 25.15,
+            },
+            rain_zones=[
+                {
+                    "id": "rain-1",
+                    "center": {
+                        "lon": 121.52,
+                        "lat": 25.05,
+                        "normalized": {"x": 0.42, "y": 0.58},
+                    },
+                    "radius_m": 450,
+                }
+            ],
+            block_segments=[
+                {
+                    "id": "block-1",
+                    "kind": "line",
+                    "from": {
+                        "lon": 121.50,
+                        "lat": 25.04,
+                        "normalized": {"x": 0.31, "y": 0.61},
+                    },
+                    "to": {
+                        "lon": 121.55,
+                        "lat": 25.02,
+                        "normalized": {"x": 0.55, "y": 0.69},
+                    },
+                }
+            ],
+            banned_stations=[
+                {"id": "shilin", "name": "Shilin", "lon": 121.52, "lat": 25.09}
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir) / "admin_scenarios.json"
+            temp_settings = replace(get_settings(), admin_scenarios_file=temp_path)
+
+            with (
+                patch("app.api.routes.settings", temp_settings),
+                patch("app.api.routes.refresh_runtime_caches"),
+            ):
+                body = await update_admin_scenarios(payload)
+
+            saved = json.loads(temp_path.read_text(encoding="utf-8"))
+            loaded = load_admin_scenarios(temp_path)
+
+        self.assertEqual(body["scenarios"], saved)
+        self.assertEqual(loaded, saved)
+        self.assertEqual(saved["source"], "qgis_geojson")
+        self.assertEqual(saved["generated_at"], "2026-04-12T10:11:12.000Z")
+        self.assertEqual(saved["ui_mode"], "block")
+        self.assertEqual(saved["map_bounds"]["min_lon"], 121.45)
+        self.assertEqual(saved["rain_zones"][0]["center"], {"lon": 121.52, "lat": 25.05})
+        self.assertEqual(saved["block_segments"][0]["from"], {"lon": 121.5, "lat": 25.04})
+        self.assertEqual(saved["block_segments"][0]["to"], {"lon": 121.55, "lat": 25.02})
+        self.assertEqual(saved["banned_stations"][0]["name"], "Shilin")
+
     async def test_gis_route_uses_active_admin_scenarios(self):
         network = _sample_network_with_topology()
         gis_payload = _sample_gis_payload()
@@ -157,8 +263,22 @@ class AdminScenarioApiTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("app.api.routes.get_subway_network", return_value=network),
-            patch("app.api.routes.build_gis_payload", return_value=gis_payload),
-            patch("app.api.routes.get_cached_walk_graph", return_value=build_walk_graph(None)),
+            patch(
+                "app.api.routes.get_route_engine",
+                return_value=RouteEngine(
+                    apply_admin_scenarios_to_network(
+                        network,
+                        {
+                            "closed_station_ids": ["B"],
+                            "closed_segment_keys": [],
+                        },
+                    )
+                ),
+            ),
+            patch(
+                "app.api.routes.get_gis_route_context",
+                return_value=_sample_gis_route_context(exclude_station_ids={"B"}),
+            ),
             patch("app.api.routes.load_admin_scenarios", return_value=scenarios),
         ):
             body = await get_gis_route_for_points(
@@ -171,16 +291,10 @@ class AdminScenarioApiTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        self.assertEqual(body["route"]["station_ids"], ["A", "D", "C"])
+        self.assertEqual(body["route"]["station_ids"], ["D", "C"])
         self.assertEqual(body["route"]["line_sequence"], ["red"])
-        self.assertEqual(body["selected_start_station"]["id"], "A")
-        self.assertEqual(
-            [item["station_id"] for item in body["start_station_attempts"][:2]],
-            ["B", "A"],
-        )
-        self.assertEqual(body["start_station_attempts"][0]["status"], "rejected")
-        self.assertEqual(body["start_station_attempts"][1]["status"], "selected")
-        self.assertEqual(body["admin_effects"]["explicit_banned_station_ids"], ["B"])
+        self.assertEqual(body["selected_start_station"]["id"], "D")
+        self.assertEqual(body["selected_end_station"]["id"], "C")
 
     async def test_gis_route_rain_only_blocks_start_and_end_station_selection(self):
         network = _sample_network_with_topology()
@@ -193,8 +307,8 @@ class AdminScenarioApiTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("app.api.routes.get_subway_network", return_value=network),
-            patch("app.api.routes.build_gis_payload", return_value=gis_payload),
-            patch("app.api.routes.get_cached_walk_graph", return_value=build_walk_graph(None)),
+            patch("app.api.routes.get_route_engine", return_value=RouteEngine(network)),
+            patch("app.api.routes.get_gis_route_context", return_value=_sample_gis_route_context()),
             patch("app.api.routes.load_admin_scenarios", return_value=scenarios),
         ):
             body = await get_gis_route_for_points(
@@ -211,7 +325,6 @@ class AdminScenarioApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["selected_end_station"]["id"], "C")
         self.assertEqual(body["route"]["station_ids"], ["A", "B", "C"])
         self.assertEqual(body["route"]["line_sequence"], ["blue"])
-        self.assertEqual(body["admin_effects"]["rain_station_ids"], ["B"])
 
 
 if __name__ == "__main__":

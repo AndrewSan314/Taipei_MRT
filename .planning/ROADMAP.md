@@ -26,6 +26,14 @@ Focus: Eliminate cold-start lag and elevate the GIS visual quality.
   - Benchmark Dijkstra vs. A* on common Taipei routes.
   - Update `TESTING.md` with new optimization test cases.
 
+### Phase 4: Admin Scenario Integration (End-to-End)
+- **Goal**: Connect Admin Studio overrides to the routing engine.
+- **Tasks**:
+  - Implement `/api/admin/scenarios` (GET, PUT, DELETE).
+  - Inject scenario effects into the `SubwayNetwork` loading process.
+  - Invalidate caches when admin scenarios are modified.
+  - Verify detour calculation in GIS studio.
+
 ## Future Milestones
 
 - **Milestone 2**: Multi-modal integration (Buses, Ubike).

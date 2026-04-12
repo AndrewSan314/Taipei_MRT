@@ -19,7 +19,7 @@ from app.services.gis_route_geometry import build_ride_path_features
 from app.services.gis_runtime_artifacts import load_or_build_gis_runtime_artifacts
 from app.services.gis_route import walking_time_sec
 from app.services.walk_network import build_walk_graph
-from app.services.walk_network import find_nearest_station_by_walk
+from app.services.walk_network import find_candidate_stations_by_walk
 from app.services.mbtiles import get_mbtiles_metadata
 from app.services.mbtiles import read_mbtiles_tile
 from app.services.subway_network_store import load_network_definition
@@ -27,11 +27,14 @@ from app.services.subway_network_store import save_network_definition
 from app.services.runtime import get_network as get_subway_network
 from app.services.runtime import get_route_engine
 from app.services.runtime import refresh_runtime_caches
+from app.services.admin_scenarios import load_admin_scenarios
+from app.services.admin_scenarios import save_admin_scenarios as save_admin_scenarios_in_store
 
 router = APIRouter(prefix="/api", tags=["subway"])
 settings = get_settings()
 _GIS_ROUTE_CONTEXT_CACHE: dict[str, GisRouteContext] = {}
 _GIS_ROUTE_CONTEXT_CACHE_MAXSIZE = 4
+_GIS_ROUTE_CANDIDATE_LIMIT: int | None = None
 
 
 class RouteRequest(BaseModel):
@@ -108,6 +111,54 @@ class BuilderNetworkSaveRequest(BaseModel):
     station_lines: list[BuilderStationLinePayload]
     default_travel_sec: int = 90
     default_transfer_sec: int = 180
+
+
+class AdminNormalizedPointPayload(BaseModel):
+    x: float
+    y: float
+
+
+class AdminPointPayload(BaseModel):
+    lon: float
+    lat: float
+    normalized: AdminNormalizedPointPayload | None = None
+
+
+class AdminMapBoundsPayload(BaseModel):
+    min_lon: float
+    min_lat: float
+    max_lon: float
+    max_lat: float
+
+
+class AdminRainZonePayload(BaseModel):
+    id: str
+    center: AdminPointPayload
+    radius_m: int
+
+
+class AdminBlockSegmentPayload(BaseModel):
+    id: str
+    kind: str
+    from_point: AdminPointPayload = Field(alias="from")
+    to: AdminPointPayload
+
+
+class AdminBannedStationPayload(BaseModel):
+    id: str
+    name: str | None = None
+    lon: float | None = None
+    lat: float | None = None
+
+
+class AdminScenarioSaveRequest(BaseModel):
+    source: str | None = None
+    generated_at: str | None = None
+    ui_mode: str | None = None
+    map_bounds: AdminMapBoundsPayload | None = None
+    rain_zones: list[AdminRainZonePayload] = Field(default_factory=list)
+    block_segments: list[AdminBlockSegmentPayload] = Field(default_factory=list)
+    banned_stations: list[AdminBannedStationPayload] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -409,6 +460,22 @@ def _build_fallback_ride_path_features(
     ]
 
 
+def _select_gis_route_score(
+    route_result,
+    start_walk_result,
+    end_walk_result,
+    walking_m_per_sec: float,
+) -> tuple[int, int, int, int]:
+    access_walk_time_sec = walking_time_sec(start_walk_result.distance_m, walking_m_per_sec)
+    egress_walk_time_sec = walking_time_sec(end_walk_result.distance_m, walking_m_per_sec)
+    return (
+        route_result.total_time_sec + access_walk_time_sec + egress_walk_time_sec,
+        route_result.walking_time_sec + access_walk_time_sec + egress_walk_time_sec,
+        route_result.transfer_count,
+        route_result.stop_count,
+    )
+
+
 def _build_gis_route_context(network: object, signature: str) -> GisRouteContext:
     fallback_bounds = (
         settings.fallback_min_lon,
@@ -552,6 +619,26 @@ async def get_gis_network():
     }
     payload["station_catalog"] = _build_station_catalog_from_geojson(payload["stations"], active_station_ids)
     payload["line_catalog"] = _build_line_catalog_from_network(network)
+
+    # Inject is_closed flags from admin scenarios
+    effects = network.metadata.get("admin_effects") or {}
+    closed_stations = set(effects.get("closed_station_ids", []))
+    closed_segments = set(effects.get("closed_segment_keys", []))
+
+    for feature in payload["stations"].get("features", []):
+        s_id = _feature_station_id(feature)
+        if s_id in closed_stations:
+            feature.setdefault("properties", {})["is_closed"] = True
+
+    for feature in payload["lines"].get("features", []):
+        line_id = (feature.get("properties", {}) or {}).get("line_id")
+        from_id = (feature.get("properties", {}) or {}).get("from_id")
+        to_id = (feature.get("properties", {}) or {}).get("to_id")
+        if line_id and from_id and to_id:
+            seg_key = f"{line_id}:{from_id}:{to_id}"
+            rev_key = f"{line_id}:{to_id}:{from_id}"
+            if seg_key in closed_segments or rev_key in closed_segments:
+                feature.setdefault("properties", {})["is_closed"] = True
     if payload.get("source", "").startswith("qgis_geojson"):
         payload["source"] = "qgis_geojson"
     basemap = get_mbtiles_metadata(settings.gis_mbtiles_file)
@@ -652,50 +739,77 @@ async def get_gis_route_for_points(request: GisPointRouteRequest):
 
     warnings: list[str] = []
     route_quality = "normal"
-    try:
-        start_walk_result = find_nearest_station_by_walk(
-            request.start_lon,
-            request.start_lat,
-            station_coords_by_id,
-            gis_payload.get("station_access_points"),
-            None,
-            walk_graph=context.walk_graph,
-            targets_by_node=context.walk_targets_by_node,
-        )
-        end_walk_result = find_nearest_station_by_walk(
-            request.end_lon,
-            request.end_lat,
-            station_coords_by_id,
-            gis_payload.get("station_access_points"),
-            None,
-            walk_graph=context.walk_graph,
-            targets_by_node=context.walk_targets_by_node,
-        )
-        selected_start_station_id = start_walk_result.station_id
-        selected_end_station_id = end_walk_result.station_id
-        access_walk_distance_m = start_walk_result.distance_m
-        egress_walk_distance_m = end_walk_result.distance_m
-    except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
+    start_candidates = find_candidate_stations_by_walk(
+        request.start_lon,
+        request.start_lat,
+        station_coords_by_id,
+        gis_payload.get("station_access_points"),
+        None,
+        walk_graph=context.walk_graph,
+        targets_by_node=None,
+        limit=_GIS_ROUTE_CANDIDATE_LIMIT,
+    )
+    end_candidates = find_candidate_stations_by_walk(
+        request.end_lon,
+        request.end_lat,
+        station_coords_by_id,
+        gis_payload.get("station_access_points"),
+        None,
+        walk_graph=context.walk_graph,
+        targets_by_node=None,
+        limit=_GIS_ROUTE_CANDIDATE_LIMIT,
+    )
+    if not start_candidates or not end_candidates:
+        raise HTTPException(status_code=404, detail="No GIS stations available")
 
-    route_payload: dict | None = None
-    try:
-        engine = get_route_engine()
-        route_result = engine.find_route_through_stations(
-            [
-                selected_start_station_id,
-                *request.via_station_ids,
-                selected_end_station_id,
-            ]
-        )
-        route_payload = route_result.to_dict()
-    except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
+    engine = get_route_engine()
+    best_route_payload: dict | None = None
+    best_start_walk_result = None
+    best_end_walk_result = None
+    best_route_score: tuple[int, int, int, int] | None = None
+
+    for start_walk_result in start_candidates:
+        for end_walk_result in end_candidates:
+            try:
+                route_result = engine.find_route_through_stations(
+                    [
+                        start_walk_result.station_id,
+                        *request.via_station_ids,
+                        end_walk_result.station_id,
+                    ]
+                )
+            except ValueError:
+                continue
+
+            if not any(step.kind == "ride" for step in route_result.steps):
+                continue
+
+            route_score = _select_gis_route_score(
+                route_result,
+                start_walk_result,
+                end_walk_result,
+                request.walking_m_per_sec,
+            )
+            if best_route_score is None or route_score < best_route_score:
+                best_route_score = route_score
+                best_route_payload = route_result.to_dict()
+                best_start_walk_result = start_walk_result
+                best_end_walk_result = end_walk_result
+
+    if best_route_payload is None or best_start_walk_result is None or best_end_walk_result is None:
+        raise HTTPException(status_code=404, detail="No route found between the selected points")
+
+    start_walk_result = best_start_walk_result
+    end_walk_result = best_end_walk_result
+    selected_start_station_id = start_walk_result.station_id
+    selected_end_station_id = end_walk_result.station_id
+    access_walk_distance_m = start_walk_result.distance_m
+    egress_walk_distance_m = end_walk_result.distance_m
 
     access_walk_time_sec = walking_time_sec(access_walk_distance_m, request.walking_m_per_sec)
     egress_walk_time_sec = walking_time_sec(egress_walk_distance_m, request.walking_m_per_sec)
     station_lookup = context.station_lookup or _station_lookup_payload()
-    route_payload = _enrich_route_payload(route_payload, station_lookup, network)
+    route_payload = _enrich_route_payload(best_route_payload, station_lookup, network)
     ride_path_features = build_ride_path_features(
         route_steps=route_payload.get("steps", []),
         station_coords_by_id=station_coords_by_id,
@@ -865,3 +979,31 @@ async def save_builder_network(request: BuilderNetworkSaveRequest):
         "message": "Network definition saved",
         "saved": saved,
     }
+
+
+@router.get("/admin/scenarios")
+async def get_admin_scenarios():
+    return load_admin_scenarios(settings.admin_scenarios_file)
+
+
+@router.put("/admin/scenarios")
+async def update_admin_scenarios(request: AdminScenarioSaveRequest):
+    scenarios = save_admin_scenarios_in_store(
+        settings.admin_scenarios_file,
+        request.model_dump(mode="json", by_alias=True, exclude_none=True),
+    )
+    refresh_runtime_caches()
+    return {
+        "message": "Admin scenarios updated",
+        "scenarios": scenarios,
+    }
+
+
+@router.delete("/admin/scenarios")
+async def reset_admin_scenarios():
+    save_admin_scenarios_in_store(
+        settings.admin_scenarios_file,
+        {},
+    )
+    refresh_runtime_caches()
+    return {"message": "Admin scenarios reset to default"}

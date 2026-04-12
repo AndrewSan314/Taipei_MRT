@@ -1,6 +1,6 @@
 {
-  "source": "qgis_geojson_partial",
-  "generated_at": "2026-04-11T16:33:11.093Z",
+  "source": "qgis_geojson",
+  "generated_at": "2026-04-12T04:51:40.047Z",
   "ui_mode": "block",
   "map_bounds": {
     "min_lon": 121.445614,
@@ -11,77 +11,22 @@
   "rain_zones": [],
   "block_segments": [
     {
-      "id": "block-1775925017954-g41se6qq7",
+      "id": "block-1775969500046-aqdx7tvp1",
       "kind": "line",
       "from": {
-        "lon": 121.531522,
-        "lat": 25.074444
+        "lon": 121.518139,
+        "lat": 25.104315
       },
       "to": {
-        "lon": 121.535055,
-        "lat": 25.072615
-      }
-    },
-    {
-      "id": "block-1775925021285-peru4wwa5",
-      "kind": "line",
-      "from": {
-        "lon": 121.514698,
-        "lat": 25.083739
-      },
-      "to": {
-        "lon": 121.518063,
-        "lat": 25.08191
-      }
-    },
-    {
-      "id": "block-1775925040920-pnt88q22g",
-      "kind": "line",
-      "from": {
-        "lon": 121.548514,
-        "lat": 25.065148
-      },
-      "to": {
-        "lon": 121.514698,
-        "lat": 25.065148
-      }
-    },
-    {
-      "id": "block-1775925051171-ky9u2tpy1",
-      "kind": "line",
-      "from": {
-        "lon": 121.518063,
-        "lat": 25.063319
-      },
-      "to": {
-        "lon": 121.518063,
-        "lat": 25.054175
-      }
-    },
-    {
-      "id": "block-1775925091151-ofxgnkv1u",
-      "kind": "line",
-      "from": {
-        "lon": 121.531522,
-        "lat": 25.046707
-      },
-      "to": {
-        "lon": 121.535055,
-        "lat": 25.044878
-      }
-    },
-    {
-      "id": "block-1775925191091-y2p36mmcn",
-      "kind": "line",
-      "from": {
-        "lon": 121.477854,
-        "lat": 25.027196
-      },
-      "to": {
-        "lon": 121.477686,
-        "lat": 25.011646
+        "lon": 121.527019,
+        "lat": 25.107442
       }
     }
   ],
-  "banned_stations": []
+  "banned_stations": [
+    {
+      "id": "shilin",
+      "name": "Shilin"
+    }
+  ]
 }
