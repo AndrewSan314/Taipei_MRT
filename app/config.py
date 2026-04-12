@@ -8,7 +8,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_FILE = PROJECT_ROOT / "app" / "data" / "gis" / "network_topology.json"
 DEFAULT_POSITION_FILE = (
-    PROJECT_ROOT / "app" / "data" / "gis" / "station_positions.json"
+    PROJECT_ROOT / "app" / "data" / "station_positions_taipei_vector_map_2022.json"
 )
 DEFAULT_OSM_ENRICHMENT_FILE = PROJECT_ROOT / "app" / "data" / "subway_osm_enrichment.json"
 DEFAULT_GIS_MBTILES_FILE = PROJECT_ROOT / "OUTPUT_FILE.mbtiles"

@@ -9,6 +9,9 @@ from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi.responses import Response
 
+from app.domain.models import SubwayNetwork
+from app.services.route_engine import RouteEngine
+
 from app.config import get_settings
 from app.services.calibration_store import save_station_positions
 from app.services.gis_loader import build_gis_payload
@@ -26,11 +29,12 @@ from app.services.subway_network_store import load_network_definition
 from app.services.subway_network_store import save_network_definition
 from app.services.runtime import get_network as get_subway_network
 from app.services.runtime import get_route_engine
-from app.services.runtime import refresh_runtime_caches
 from app.services.admin_scenarios import (
     load_admin_scenarios,
-    save_admin_scenarios,
+    save_admin_scenarios as save_admin_scenarios_service,
     default_admin_scenarios,
+    build_admin_scenario_effects,
+    apply_admin_scenarios_to_network,
 )
 
 router = APIRouter(prefix="/api", tags=["subway"])
@@ -485,7 +489,9 @@ def _build_gis_route_context_signature() -> str:
         parts.append(_path_signature(positions_path))
     if enrichment_path is not None:
         parts.append(_path_signature(enrichment_path))
+    parts.append(_path_signature(settings.admin_scenarios_file))
     return "|".join(parts)
+
 
 
 def get_gis_route_context(network: object) -> GisRouteContext:
@@ -535,6 +541,7 @@ async def get_network():
 async def get_gis_network():
     network = get_subway_network()
     fallback_bounds = (
+
         settings.fallback_min_lon,
         settings.fallback_min_lat,
         settings.fallback_max_lon,
@@ -656,6 +663,7 @@ async def get_gis_route_for_points(request: GisPointRouteRequest):
 
     network = get_subway_network()
     for via_station_id in request.via_station_ids:
+
         if via_station_id not in network.stations:
             raise HTTPException(status_code=400, detail=f"Unknown via station: {via_station_id}")
 
@@ -695,7 +703,7 @@ async def get_gis_route_for_points(request: GisPointRouteRequest):
 
     route_payload: dict | None = None
     try:
-        engine = get_route_engine()
+        engine = RouteEngine(network)
         route_result = engine.find_route_through_stations(
             [
                 selected_start_station_id,
@@ -811,8 +819,9 @@ async def get_builder_network():
 
 @router.post("/route")
 async def get_route(request: RouteRequest):
-    engine = get_route_engine()
     network = get_subway_network()
+    engine = RouteEngine(network)
+
     try:
         result = engine.find_route_through_stations(
             [
@@ -829,8 +838,9 @@ async def get_route(request: RouteRequest):
 
 @router.post("/route/points")
 async def get_route_for_points(request: PointRouteRequest):
-    engine = get_route_engine()
     network = get_subway_network()
+    engine = RouteEngine(network)
+
     try:
         result = engine.find_best_route_for_points(
             start_x=request.start_x,
@@ -891,13 +901,13 @@ async def get_admin_scenarios():
 @router.put("/admin/scenarios")
 async def save_admin_scenarios(request: AdminScenarioSaveRequest):
     payload = request.dict()
-    scenarios = save_admin_scenarios(settings.admin_scenarios_file, payload)
+    scenarios = save_admin_scenarios_service(settings.admin_scenarios_file, payload)
     return {"status": "ok", "scenarios": scenarios}
 
 
 @router.delete("/admin/scenarios")
 async def reset_admin_scenarios():
-    scenarios = save_admin_scenarios(
+    scenarios = save_admin_scenarios_service(
         settings.admin_scenarios_file, default_admin_scenarios()
     )
     return {"status": "ok", "scenarios": scenarios}
