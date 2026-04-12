@@ -14,6 +14,12 @@ from app.services.subway_loader import load_json_file
 from app.services.subway_loader import load_network_from_dict
 from app.services.subway_loader import load_station_positions_file
 from app.services.subway_loader import merge_network_enrichment
+from app.services.admin_scenarios import (
+    load_admin_scenarios,
+    build_admin_scenario_effects,
+    apply_admin_scenarios_to_network,
+)
+
 
 
 def get_network():
@@ -33,11 +39,22 @@ def get_network():
         str(positions_path) if positions_path else "",
         str(enrichment_path) if enrichment_path else "",
         str(settings.qgis_geojson_dir),
+        str(settings.admin_scenarios_file),
+        settings.map_width,
+        settings.map_height,
+        (
+            settings.fallback_min_lon,
+            settings.fallback_min_lat,
+            settings.fallback_max_lon,
+            settings.fallback_max_lat,
+        ),
         settings.default_transfer_sec,
+
         settings.auto_walk_transfer_radius,
         settings.auto_walk_seconds_per_unit,
         signature,
     )
+
 
 
 @lru_cache(maxsize=4)
@@ -46,11 +63,17 @@ def _load_network_cached(
     positions_path: str,
     enrichment_path: str,
     qgis_geojson_dir: str,
+    admin_scenarios_path: str,
+    map_width: float,
+    map_height: float,
+    fallback_bounds: tuple[float, float, float, float],
     default_transfer_sec: int,
+
     auto_walk_transfer_radius: float,
     auto_walk_seconds_per_unit: float,
     signature: str,
 ):
+
     del signature
     options = NetworkBuildOptions(
         station_positions=load_station_positions_file(positions_path or None),
@@ -65,7 +88,29 @@ def _load_network_cached(
         options=options,
     )
     _supplement_segments_from_gis(network, Path(qgis_geojson_dir))
+
+    # Apply admin scenarios (e.g., blocked stations, rain zones)
+    # We need to build a temporary GIS payload to calculate effects
+    from app.services.gis_loader import build_gis_payload
+    gis_payload = build_gis_payload(
+        network=network,
+        qgis_geojson_dir=Path(qgis_geojson_dir),
+        map_width=map_width,
+        map_height=map_height,
+        fallback_bounds=fallback_bounds,
+        include_walk_network=False,
+    )
+
+    scenarios = load_admin_scenarios(admin_scenarios_path)
+    effects = build_admin_scenario_effects(
+        network=network,
+        gis_payload=gis_payload,
+        scenarios=scenarios,
+    )
+    network = apply_admin_scenarios_to_network(network, effects)
+
     return network
+
 
 
 def get_route_engine() -> RouteEngine:
@@ -85,11 +130,22 @@ def get_route_engine() -> RouteEngine:
         str(positions_path) if positions_path else "",
         str(enrichment_path) if enrichment_path else "",
         str(settings.qgis_geojson_dir),
+        str(settings.admin_scenarios_file),
+        settings.map_width,
+        settings.map_height,
+        (
+            settings.fallback_min_lon,
+            settings.fallback_min_lat,
+            settings.fallback_max_lon,
+            settings.fallback_max_lat,
+        ),
         settings.default_transfer_sec,
+
         settings.auto_walk_transfer_radius,
         settings.auto_walk_seconds_per_unit,
         signature,
     )
+
 
 
 @lru_cache(maxsize=4)
@@ -98,21 +154,33 @@ def _load_route_engine_cached(
     positions_path: str,
     enrichment_path: str,
     qgis_geojson_dir: str,
+    admin_scenarios_path: str,
+    map_width: float,
+    map_height: float,
+    fallback_bounds: tuple[float, float, float, float],
     default_transfer_sec: int,
+
     auto_walk_transfer_radius: float,
     auto_walk_seconds_per_unit: float,
     signature: str,
 ) -> RouteEngine:
+
     network = _load_network_cached(
         source_path,
         positions_path,
         enrichment_path,
         qgis_geojson_dir,
+        admin_scenarios_path,
+        map_width,
+        map_height,
+        fallback_bounds,
         default_transfer_sec,
+
         auto_walk_transfer_radius,
         auto_walk_seconds_per_unit,
         signature,
     )
+
     return RouteEngine(network)
 
 
@@ -134,8 +202,12 @@ def _build_signature(
         parts.append(_path_signature(enrichment_path))
     parts.append(_path_signature(qgis_geojson_dir / "stations.geojson"))
     parts.append(_path_signature(qgis_geojson_dir / "lines.geojson"))
+    
+    settings = get_settings()
+    parts.append(_path_signature(settings.admin_scenarios_file))
 
     return "|".join(parts)
+
 
 
 def _path_signature(path: Path) -> str:

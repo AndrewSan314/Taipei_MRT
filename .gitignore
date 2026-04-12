@@ -24,3 +24,7 @@ scratch/
 UAT-*.md
 *.png
 *.webp
+
+# Agent metadata
+.gemini/
+.planning/
