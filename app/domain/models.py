@@ -81,6 +81,7 @@ class RouteStep:
     line_id: str
     next_station_id: str | None = None
     duration_sec: int = 0
+    coordinates: list[tuple[float, float]] | None = None
 
 
 @dataclass
@@ -108,6 +109,7 @@ class RouteResult:
                     "line_id": step.line_id,
                     "next_station_id": step.next_station_id,
                     "duration_sec": step.duration_sec,
+                    "coordinates": step.coordinates,
                 }
                 for step in self.steps
             ],

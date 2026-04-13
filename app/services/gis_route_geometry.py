@@ -27,7 +27,7 @@ class SnapPoint:
     segment_offset: float
 
 
-def build_ride_path_features(
+def build_route_geometry_features(
     route_steps: list[dict[str, Any]],
     station_coords_by_id: dict[str, Coordinate],
     stations_geojson: dict[str, Any] | None,
@@ -55,20 +55,9 @@ def build_ride_path_features(
         if geojson_line_colors is None:
             geojson_line_colors = _extract_line_colors_from_geojson(all_line_features)
 
-    if explicit_precomputed_segment_index:
-        return _build_ride_path_features_from_precomputed_segments(
-            route_steps=route_steps,
-            station_coords_by_id=station_coords_by_id,
-            precomputed_segment_index=precomputed_segment_index,
-            geojson_line_colors=geojson_line_colors,
-            all_line_features=all_line_features,
-            fallback_to_station_sequence=True,
-        )
-
-    if not _is_valid_geojson(lines_geojson):
-        return []
-
-    ride_features: list[dict[str, Any]] = []
+    features: list[dict[str, Any]] = []
+    
+    # Process contiguous rides
     for ride_group in _group_contiguous_ride_steps(route_steps):
         line_id = ride_group[0].get("line_id")
         candidate_features: list[dict[str, Any]] = []
@@ -95,6 +84,9 @@ def build_ride_path_features(
                 candidate_features,
             )
 
+        if not coordinates:
+            continue
+
         line_color = (
             geojson_line_colors.get(line_id)
             if line_id
@@ -105,7 +97,7 @@ def build_ride_path_features(
         if line_color:
             properties["line_color"] = line_color
 
-        ride_features.append(
+        features.append(
             {
                 "type": "Feature",
                 "geometry": {
@@ -116,7 +108,53 @@ def build_ride_path_features(
             }
         )
 
-    return ride_features
+    # Process transfers and walks to bridge gaps
+    for step in route_steps:
+        if step.get("kind") in ("transfer", "walk"):
+            start_id = step.get("station_id")
+            end_id = step.get("next_station_id")
+            if not start_id or not end_id:
+                continue
+            
+            # Use detailed coordinates if available (road-following path)
+            step_coords = step.get("coordinates")
+            if step_coords and len(step_coords) >= 2:
+                features.append({
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[c[0], c[1]] for c in step_coords]
+                    },
+                    "properties": {
+                        "kind": "walk",
+                        "station_id": start_id,
+                        "next_station_id": end_id
+                    }
+                })
+                continue
+
+            # Fallback to straight line
+            start_coord = station_coords_by_id.get(start_id)
+            end_coord = station_coords_by_id.get(end_id)
+            
+            if start_coord and end_coord and not _coordinates_equal(start_coord, end_coord):
+                features.append({
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [start_coord[0], start_coord[1]],
+                            [end_coord[0], end_coord[1]]
+                        ]
+                    },
+                    "properties": {
+                        "kind": "walk",
+                        "station_id": start_id,
+                        "next_station_id": end_id
+                    }
+                })
+
+    return features
 
 
 def _build_ride_path_features_from_precomputed_segments(

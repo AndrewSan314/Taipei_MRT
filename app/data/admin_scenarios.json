@@ -1,9 +1,39 @@
 {
-  "source": "server",
-  "generated_at": null,
-  "ui_mode": "rain",
-  "map_bounds": null,
+  "source": "qgis_geojson",
+  "generated_at": "2026-04-13T04:34:07.904Z",
+  "ui_mode": "block",
+  "map_bounds": {
+    "min_lon": 121.445614,
+    "min_lat": 24.946521,
+    "max_lon": 121.617598,
+    "max_lat": 25.183875
+  },
   "rain_zones": [],
-  "block_segments": [],
+  "block_segments": [
+    {
+      "id": "block-1776054840172-fa6gzmu6a",
+      "kind": "line",
+      "from": {
+        "lon": 121.504964,
+        "lat": 25.080389
+      },
+      "to": {
+        "lon": 121.53779,
+        "lat": 25.066207
+      }
+    },
+    {
+      "id": "block-1776054847903-x7fl8sm7k",
+      "kind": "line",
+      "from": {
+        "lon": 121.514634,
+        "lat": 25.056441
+      },
+      "to": {
+        "lon": 121.526146,
+        "lat": 25.064187
+      }
+    }
+  ],
   "banned_stations": []
 }

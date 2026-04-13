@@ -6,6 +6,11 @@ from typing import Any
 from app.services.walk_network import build_walk_graph
 from app.services.walk_network import find_candidate_stations_by_walk
 from app.services.walk_network import find_nearest_station_by_walk
+from app.services.geo_utils import haversine_distance_m, walking_time_sec
+
+
+from app.domain.models import RouteResult
+from app.services.walk_network import WalkGraph, find_walk_path
 
 
 def extract_station_coordinates(stations_geojson: dict[str, Any]) -> dict[str, tuple[float, float]]:
@@ -26,22 +31,35 @@ def extract_station_coordinates(stations_geojson: dict[str, Any]) -> dict[str, t
     return lookup
 
 
-def haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    earth_radius_m = 6_371_000.0
-    rad_lat1 = math.radians(lat1)
-    rad_lon1 = math.radians(lon1)
-    rad_lat2 = math.radians(lat2)
-    rad_lon2 = math.radians(lon2)
-    delta_lat = rad_lat2 - rad_lat1
-    delta_lon = rad_lon2 - rad_lon1
+def enrich_route_with_walk_paths(
+    route_result: RouteResult,
+    walk_graph: WalkGraph,
+    station_coords_by_id: dict[str, tuple[float, float]],
+    settings: Any | None = None,
+) -> None:
+    """Enriches any 'walk' or 'transfer' steps (between different stations) with actual road-following coordinates."""
+    if not walk_graph.adjacency:
+        return
 
-    a = (
-        math.sin(delta_lat / 2) ** 2
-        + math.cos(rad_lat1) * math.cos(rad_lat2) * (math.sin(delta_lon / 2) ** 2)
-    )
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(max(1e-12, 1 - a)))
-    return earth_radius_m * c
-
-
-def walking_time_sec(distance_m: float, walking_m_per_sec: float) -> int:
-    return max(0, int(round(distance_m / walking_m_per_sec)))
+    for step in route_result.steps:
+        if step.kind in ("walk", "transfer") and step.next_station_id:
+            if step.station_id == step.next_station_id:
+                continue
+                
+            start_coord = station_coords_by_id.get(step.station_id)
+            end_coord = station_coords_by_id.get(step.next_station_id)
+            
+            if start_coord and end_coord:
+                try:
+                    step.coordinates = find_walk_path(
+                        start_coord[0],
+                        start_coord[1],
+                        end_coord[0],
+                        end_coord[1],
+                        walk_graph,
+                        settings=settings,
+                    )
+                except Exception:
+                    # Fallback to straight line is implicit by leaving coordinates as None
+                    # or adding them explicitly if we want to guarantee consistency
+                    pass

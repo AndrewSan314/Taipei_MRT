@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from app.domain.models import RouteResult
 from app.domain.models import RouteStep
 from app.domain.models import SubwayNetwork
+from app.services.geo_utils import haversine_distance_m, euclidean_distance
+
+MAX_AUTO_WALK_DISTANCE_M = 5000.0
+WALKING_SPEED_M_PER_SEC = 1.3  # Approx 4.7 km/h
 
 
 State = tuple[str, str]
@@ -33,14 +37,22 @@ class RouteEngine:
         self._precompute_shortest_paths()
 
     def _build_graph(self) -> None:
+        # Precompute coordinates for all stations to avoid expensive and fragile searches
+        station_coords = {}
+        for stop in self.network.stops.values():
+            if stop.station_id not in station_coords:
+                station_coords[stop.station_id] = (stop.latitude, stop.longitude)
+
         for station_line in self.network.station_lines:
             self.graph.setdefault((station_line.station_id, station_line.line_id), [])
 
+        # 1. Subway Segments (Ride)
         for segment in self.network.segments:
             forward = (segment.from_station_id, segment.line_id)
             backward = (segment.to_station_id, segment.line_id)
             if forward not in self.graph or backward not in self.graph:
                 continue
+                
             ride_cost = (segment.travel_sec, 0, 0, 1)
             self.graph[forward].append(
                 Edge(
@@ -59,6 +71,21 @@ class RouteEngine:
                 )
             )
 
+            # ADD MANDATORY WALK FALLBACK between stations that have a segment
+            # Use precomputed coordinates (much safer than previous next() calls)
+            c1 = station_coords.get(segment.from_station_id)
+            c2 = station_coords.get(segment.to_station_id)
+            
+            if c1 and c2:
+                dist_m = haversine_distance_m(c1[0], c1[1], c2[0], c2[1])
+                duration_sec = int(round(dist_m / WALKING_SPEED_M_PER_SEC))
+                walk_cost = (duration_sec, duration_sec, 0, 0)
+                
+                # Bi-directional walk fallback
+                self.graph[forward].append(Edge(target=backward, cost=walk_cost, kind="walk", duration_sec=duration_sec))
+                self.graph[backward].append(Edge(target=forward, cost=walk_cost, kind="walk", duration_sec=duration_sec))
+
+        # 2. Transfers (Standard)
         for transfer in self.network.transfers:
             source = (transfer.station_id, transfer.from_line_id)
             target = (transfer.station_id, transfer.to_line_id)
@@ -73,6 +100,7 @@ class RouteEngine:
                 )
             )
 
+        # 3. Walk Transfers (Explicit)
         for walk_transfer in self.network.walk_transfers:
             source_line_ids = self.network.station_to_lines.get(walk_transfer.from_station_id)
             target_line_ids = self.network.station_to_lines.get(walk_transfer.to_station_id)
@@ -94,6 +122,45 @@ class RouteEngine:
                             duration_sec=walk_transfer.duration_sec,
                         )
                     )
+
+        # 4. Proximity Walking edges (General fallback)
+        station_id_list = sorted(self.network.stations.keys())
+        for i, s1_id in enumerate(station_id_list):
+            c1 = station_coords.get(s1_id)
+            if not c1: continue
+            
+            for j in range(i + 1, len(station_id_list)):
+                s2_id = station_id_list[j]
+                c2 = station_coords.get(s2_id)
+                if not c2: continue
+                
+                dist_m = haversine_distance_m(c1[0], c1[1], c2[0], c2[1])
+                if dist_m > MAX_AUTO_WALK_DISTANCE_M:
+                    continue
+                
+                duration_sec = int(round(dist_m / WALKING_SPEED_M_PER_SEC))
+                walk_cost = (duration_sec, duration_sec, 0, 0)
+                
+                s1_lines = self.network.station_to_lines.get(s1_id, set())
+                s2_lines = self.network.station_to_lines.get(s2_id, set())
+                
+                for l1 in s1_lines:
+                    source = (s1_id, l1)
+                    if source not in self.graph: continue
+                    for l2 in s2_lines:
+                        target = (s2_id, l2)
+                        if target not in self.graph: continue
+                        
+                        # Only add if not already present (optimization)
+                        if any(e.target == target and e.kind == "walk" for e in self.graph[source]):
+                            continue
+
+                        self.graph[source].append(
+                            Edge(target=target, cost=walk_cost, kind="walk", duration_sec=duration_sec)
+                        )
+                        self.graph[target].append(
+                            Edge(target=source, cost=walk_cost, kind="walk", duration_sec=duration_sec)
+                        )
 
         # Keep deterministic traversal order, but sort once at build-time
         # instead of sorting on every routing query.
@@ -185,11 +252,11 @@ class RouteEngine:
 
         start_states = [
             (start_station_id, line_id)
-            for line_id in sorted(self.network.station_to_lines[start_station_id])
+            for line_id in sorted(self.network.station_to_lines.get(start_station_id, set()))
         ]
         goal_states = [
             (end_station_id, line_id)
-            for line_id in self.network.station_to_lines[end_station_id]
+            for line_id in sorted(self.network.station_to_lines.get(end_station_id, set()))
         ]
 
         best_pair = self._find_best_precomputed_state_pair(start_states, goal_states)
@@ -259,18 +326,18 @@ class RouteEngine:
             start_x,
             start_y,
             walking_seconds_per_pixel,
-            candidate_limit,
+            candidate_limit or 3,
             max_station_walk_sec,
-            prefer_nearest=True,
+            prefer_nearest=False,
             preferred_line_ids=set(start_preferred_line_ids or []),
         )
         end_candidates = self._candidate_stations(
             end_x,
             end_y,
             walking_seconds_per_pixel,
-            candidate_limit,
+            candidate_limit or 3,
             max_station_walk_sec,
-            prefer_nearest=True,
+            prefer_nearest=False,
             preferred_line_ids=set(end_preferred_line_ids or []),
         )
 
@@ -458,7 +525,7 @@ class RouteEngine:
 
     @staticmethod
     def _distance(x1: float, y1: float, x2: float, y2: float) -> float:
-        return math.hypot(x2 - x1, y2 - y1)
+        return euclidean_distance(x1, y1, x2, y2)
 
     @staticmethod
     def _walking_time_sec(distance_px: float, walking_seconds_per_pixel: float) -> int:

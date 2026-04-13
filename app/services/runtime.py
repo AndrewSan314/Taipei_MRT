@@ -200,8 +200,10 @@ def _build_signature(
         parts.append(_path_signature(positions_path))
     if enrichment_path is not None:
         parts.append(_path_signature(enrichment_path))
-    parts.append(_path_signature(qgis_geojson_dir / "stations.geojson"))
-    parts.append(_path_signature(qgis_geojson_dir / "lines.geojson"))
+        
+    # Standard GeoJSON files from QGIS directory
+    for filename in ["stations.geojson", "lines.geojson", "walk_network.geojson", "station_access_points.geojson"]:
+        parts.append(_path_signature(qgis_geojson_dir / filename))
     
     settings = get_settings()
     parts.append(_path_signature(settings.admin_scenarios_file))

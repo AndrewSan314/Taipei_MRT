@@ -355,7 +355,17 @@ def _polyline_matches_admin_block(
             return True
         if _point_to_segment_distance_m(block_end, start, end) <= BLOCK_LINE_SEGMENT_THRESHOLD_M:
             return True
+        if _segments_intersect(block_start, block_end, start, end):
+            return True
     return False
+
+
+def _segments_intersect(p1: Coordinate, p2: Coordinate, p3: Coordinate, p4: Coordinate) -> bool:
+    """Check if segment (p1, p2) intersects with (p3, p4)."""
+    def ccw(a: Coordinate, b: Coordinate, c: Coordinate) -> bool:
+        return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+
+    return (ccw(p1, p3, p4) != ccw(p2, p3, p4)) and (ccw(p1, p2, p3) != ccw(p1, p2, p4))
 
 
 def _point_to_segment_distance_m(

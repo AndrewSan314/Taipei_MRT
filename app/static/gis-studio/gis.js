@@ -800,12 +800,18 @@ function buildRouteGeoJson(resultPayload) {
     : [];
 
   (route.steps || []).forEach((step) => {
-    if (step.kind === "transfer" || !step.next_station_id) {
+    // Skip walk/transfer steps in this loop because we rely on ridePathFeatures (road-following)
+    // or access_walk_path/egress_walk_path for these. 
+    // This loop now only serves as a fallback for the "ride" part of the journey if ridePathFeatures is empty.
+    if (step.kind === "walk" || step.kind === "transfer" || !step.next_station_id) {
       return;
     }
+    
+    // If we have detailed ride features, we don't need to draw the straight subway segments either.
     if (step.kind === "ride" && ridePathFeatures.length) {
       return;
     }
+
     const from = state.stationCoordsById.get(step.station_id);
     const to = state.stationCoordsById.get(step.next_station_id);
     if (!from || !to) {

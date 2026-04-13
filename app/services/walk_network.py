@@ -11,6 +11,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+from app.services.geo_utils import haversine_distance_m
+
+
 Coordinate = tuple[float, float]
 CellId = tuple[int, int]
 DEFAULT_GRID_TARGET_NODES_PER_CELL = 64
@@ -492,40 +495,46 @@ def find_candidate_stations_by_walk(
     if targets_by_node is not None:
         start_coordinate = (float(lon), float(lat))
         start_node = graph.nearest_node(lon, lat)
-        distance_m, previous_nodes, target_node, chosen_access = _dijkstra_to_best_access_point(
-            graph,
-            start_node,
-            targets_by_node,
-        )
-        if target_node is None or chosen_access is None:
-             return _candidate_stations_by_distance(
-                lon,
-                lat,
-                station_coords_by_id,
-                limit=limit,
-            )
         
+        # We need all reachable targets, not just one, to support Smart Snapping
+        distances, previous_nodes = _dijkstra_all_nodes(graph, start_node)
+        
+        candidates: list[WalkPathResult] = []
         # Ensure geometry is loaded if needed
         if graph.is_simplified and not graph.edge_geometry and settings:
             graph.load_geometry(settings)
-
-        path_coordinates = _build_path_coordinates(
-            start_coordinate,
-            _reconstruct_path(previous_nodes, start_node, target_node, graph=graph),
-            chosen_access.coordinate,
-        )
-        total_distance_m = (
-            _connector_distance_m(start_coordinate, start_node)
-            + distance_m
-        )
-        return [WalkPathResult(
-            station_id=chosen_access.station_id,
-            distance_m=total_distance_m,
-            path_coordinates=path_coordinates,
-            access_point_coordinate=chosen_access.coordinate,
-            snapped_start_coordinate=start_node,
-            access_point_name=chosen_access.name,
-        )]
+            
+        start_connector_dist = _connector_distance_m(start_coordinate, start_node)
+        
+        for target_node, target_dist in distances.items():
+            if target_node not in targets_by_node:
+                continue
+            
+            for access_point in targets_by_node[target_node]:
+                path_coordinates = _build_path_coordinates(
+                    start_coordinate,
+                    _reconstruct_path(previous_nodes, start_node, target_node, graph=graph),
+                    access_point.coordinate,
+                )
+                total_distance_m = (
+                    start_connector_dist
+                    + target_dist
+                    + _connector_distance_m(target_node, access_point.coordinate)
+                )
+                candidates.append(WalkPathResult(
+                    station_id=access_point.station_id,
+                    distance_m=total_distance_m,
+                    path_coordinates=path_coordinates,
+                    access_point_coordinate=access_point.coordinate,
+                    snapped_start_coordinate=start_node,
+                    access_point_name=access_point.name,
+                ))
+        
+        # Sort by walking distance so the nearest working stations come first
+        sorted_candidates = sorted(candidates, key=lambda x: x.distance_m)
+        if limit and limit > 0:
+            return sorted_candidates[:limit]
+        return sorted_candidates
 
 
     access_points = extract_station_access_points(
@@ -877,18 +886,54 @@ def _candidate_stations_by_distance(
     return results[:limit]
 
 
-def haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    earth_radius_m = 6_371_000.0
-    rad_lat1 = math.radians(lat1)
-    rad_lon1 = math.radians(lon1)
-    rad_lat2 = math.radians(lat2)
-    rad_lon2 = math.radians(lon2)
-    delta_lat = rad_lat2 - rad_lat1
-    delta_lon = rad_lon2 - rad_lon1
+def find_walk_path(
+    start_lon: float,
+    start_lat: float,
+    target_lon: float,
+    target_lat: float,
+    walk_graph: WalkGraph,
+    settings: Any | None = None,
+) -> list[Coordinate]:
+    if not walk_graph.adjacency:
+        return [(start_lon, start_lat), (target_lon, target_lat)]
 
-    a = (
-        math.sin(delta_lat / 2) ** 2
-        + math.cos(rad_lat1) * math.cos(rad_lat2) * (math.sin(delta_lon / 2) ** 2)
-    )
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(max(1e-12, 1 - a)))
-    return earth_radius_m * c
+    start_coord = (float(start_lon), float(start_lat))
+    target_coord = (float(target_lon), float(target_lat))
+    
+    start_node = walk_graph.nearest_node(*start_coord)
+    target_node = walk_graph.nearest_node(*target_coord)
+
+    if start_node == target_node:
+        return [start_coord, start_node, target_coord]
+
+    distances: dict[Coordinate, float] = {start_node: 0.0}
+    previous_nodes: dict[Coordinate, Coordinate] = {}
+    queue: list[tuple[float, Coordinate]] = [(0.0, start_node)]
+
+    found = False
+    while queue:
+        current_distance, current_node = heapq.heappop(queue)
+        if current_node == target_node:
+            found = True
+            break
+            
+        if current_distance > distances.get(current_node, float("inf")):
+            continue
+
+        for neighbor_node, edge_distance_m in walk_graph.adjacency.get(current_node, []):
+            candidate_distance = current_distance + edge_distance_m
+            if candidate_distance >= distances.get(neighbor_node, float("inf")):
+                continue
+            distances[neighbor_node] = candidate_distance
+            previous_nodes[neighbor_node] = current_node
+            heapq.heappush(queue, (candidate_distance, neighbor_node))
+
+    if not found:
+        return [start_coord, target_coord]
+
+    # Load geometry if simplified
+    if walk_graph.is_simplified and not walk_graph.edge_geometry and settings:
+        walk_graph.load_geometry(settings)
+
+    graph_path = _reconstruct_path(previous_nodes, start_node, target_node, graph=walk_graph)
+    return _build_path_coordinates(start_coord, graph_path, target_coord)

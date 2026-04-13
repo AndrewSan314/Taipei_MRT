@@ -18,17 +18,24 @@ from app.services.gis_loader import build_gis_payload
 from app.services.gis_station_store import delete_gis_station as delete_gis_station_in_store
 from app.services.gis_station_store import save_gis_station_positions
 from app.services.gis_route import extract_station_coordinates
-from app.services.gis_route_geometry import build_ride_path_features
+from app.services.gis_route_geometry import build_route_geometry_features
 from app.services.gis_runtime_artifacts import load_or_build_gis_runtime_artifacts
 from app.services.gis_route import walking_time_sec
-from app.services.walk_network import build_walk_graph
-from app.services.walk_network import find_nearest_station_by_walk
+from app.services.walk_network import (
+    build_walk_graph,
+    find_nearest_station_by_walk,
+    find_candidate_stations_by_walk,
+    find_walk_path,
+)
 from app.services.mbtiles import get_mbtiles_metadata
 from app.services.mbtiles import read_mbtiles_tile
 from app.services.subway_network_store import load_network_definition
 from app.services.subway_network_store import save_network_definition
-from app.services.runtime import get_network as get_subway_network
-from app.services.runtime import get_route_engine
+from app.services.runtime import (
+    get_network as get_subway_network,
+    get_route_engine,
+    refresh_runtime_caches,
+)
 from app.services.admin_scenarios import (
     load_admin_scenarios,
     save_admin_scenarios as save_admin_scenarios_service,
@@ -135,9 +142,9 @@ class GisRouteContext:
     station_coords_by_id: dict[str, tuple[float, float]]
     walk_graph: object
     walk_targets_by_node: dict
-    station_lookup: dict[str, dict]
-    geojson_segment_index: dict[tuple[str, str, str], list[tuple[float, float]]]
-    geojson_line_colors: dict[str, str]
+    station_lookup: dict[str, dict] | None = None
+    geojson_segment_index: dict | None = None
+    geojson_line_colors: dict | None = None
 
 
 def _raise_legacy_api_removed() -> None:
@@ -179,7 +186,7 @@ def _network_payload() -> dict:
                 "y": station.y,
                 "diagram_x": station.diagram_x,
                 "diagram_y": station.diagram_y,
-                "line_ids": sorted(network.station_to_lines[station.id]),
+                "line_ids": sorted(network.station_to_lines.get(station.id, set())),
             }
             for station in sorted(network.stations.values(), key=lambda item: item.name)
         ],
@@ -441,7 +448,8 @@ def _build_gis_route_context(network: object, signature: str) -> GisRouteContext
         map_width=settings.map_width,
         map_height=settings.map_height,
         fallback_bounds=fallback_bounds,
-        include_walk_network=False,
+        include_station_access_points=True,
+        include_walk_network=True,
     )
     station_coords_by_id = extract_station_coordinates(gis_payload["stations"])
     walk_graph = (
@@ -507,9 +515,12 @@ def get_gis_route_context(network: object) -> GisRouteContext:
     return context
 
 
-def _enrich_route_payload(route_payload: dict, station_lookup: dict[str, dict], network) -> dict:
+def _enrich_route_payload(route_payload: dict, context: GisRouteContext, network) -> dict:
+    station_lookup = context.station_lookup or _station_lookup_payload()
     route_payload["stations"] = []
-    for station_id in route_payload["station_ids"]:
+    station_ids = route_payload.get("station_ids", [])
+    
+    for station_id in station_ids:
         station = station_lookup.get(station_id)
         if station is None:
             station = {
@@ -520,10 +531,28 @@ def _enrich_route_payload(route_payload: dict, station_lookup: dict[str, dict], 
                 "lat": None,
             }
         route_payload["stations"].append(station)
+    
     route_payload["line_labels"] = [
         network.lines[line_id].name
         for line_id in route_payload["line_sequence"]
     ]
+
+    # Post-process steps to add road-following coordinates for transfers/walks
+    for step in route_payload.get("steps", []):
+        if step.get("kind") in ("walk", "transfer"):
+            start_id = step.get("station_id")
+            next_id = step.get("next_station_id")
+            if start_id and next_id and start_id in context.station_coords_by_id and next_id in context.station_coords_by_id:
+                # If coordinates are missing, calculate them using the walk graph
+                if not step.get("coordinates") and context.walk_graph:
+                    start_pos = context.station_coords_by_id[start_id]
+                    next_pos = context.station_coords_by_id[next_id]
+                    step["coordinates"] = find_walk_path(
+                        start_pos[0], start_pos[1],
+                        next_pos[0], next_pos[1],
+                        context.walk_graph
+                    )
+                    
     return route_payload
 
 
@@ -539,7 +568,7 @@ async def get_network():
 
 @router.get("/gis/network")
 async def get_gis_network():
-    network = get_subway_network()
+    network = _get_augmented_network()
     fallback_bounds = (
 
         settings.fallback_min_lon,
@@ -553,8 +582,8 @@ async def get_gis_network():
         map_width=settings.map_width,
         map_height=settings.map_height,
         fallback_bounds=fallback_bounds,
-        include_station_access_points=False,
-        include_walk_network=False,
+        include_station_access_points=True,
+        include_walk_network=True,
         merge_missing_stations=False,
     )
     active_station_ids = set(network.stations.keys())
@@ -656,27 +685,50 @@ async def delete_gis_station(station_id: str):
     }
 
 
+def _get_augmented_network() -> SubwayNetwork:
+    network = get_subway_network()
+    scenarios = load_admin_scenarios(settings.admin_scenarios_file)
+
+    # We need GIS context to calculate segment effects for blocking
+    # Using raw network here to avoid recursion, as context might depend on network
+    context = get_gis_route_context(network)
+
+    effects = build_admin_scenario_effects(
+        network=network,
+        gis_payload=context.payload,
+        scenarios=scenarios,
+    )
+
+    return apply_admin_scenarios_to_network(network, effects)
+
+
 @router.post("/gis/route/points")
 async def get_gis_route_for_points(request: GisPointRouteRequest):
-    if request.walking_m_per_sec <= 0:
-        raise HTTPException(status_code=400, detail="walking_m_per_sec must be > 0")
-
-    network = get_subway_network()
-    for via_station_id in request.via_station_ids:
-
-        if via_station_id not in network.stations:
-            raise HTTPException(status_code=400, detail=f"Unknown via station: {via_station_id}")
-
-    context = get_gis_route_context(network)
-    gis_payload = context.payload
-    station_coords_by_id = context.station_coords_by_id
-    if not station_coords_by_id:
-        raise HTTPException(status_code=500, detail="GIS station coordinates are unavailable")
-
-    warnings: list[str] = []
-    route_quality = "normal"
     try:
-        start_walk_result = find_nearest_station_by_walk(
+        if request.walking_m_per_sec <= 0:
+            raise HTTPException(status_code=400, detail="walking_m_per_sec must be > 0")
+
+        network = _get_augmented_network()
+        for via_station_id in request.via_station_ids:
+            if via_station_id not in network.stations:
+                raise HTTPException(status_code=400, detail=f"Unknown via station: {via_station_id}")
+
+        context = get_gis_route_context(network)
+        gis_payload = context.payload
+        
+        # CRITICAL: Filter station coordinates to only those active in the augmented network
+        station_coords_by_id = {
+            sid: coords 
+            for sid, coords in context.station_coords_by_id.items()
+            if sid in network.stations
+        }
+        
+        if not station_coords_by_id:
+            raise HTTPException(status_code=500, detail="GIS station coordinates are unavailable")
+
+        warnings: list[str] = []
+        route_quality = "normal"
+        start_candidates = find_candidate_stations_by_walk(
             request.start_lon,
             request.start_lat,
             station_coords_by_id,
@@ -684,8 +736,9 @@ async def get_gis_route_for_points(request: GisPointRouteRequest):
             None,
             walk_graph=context.walk_graph,
             targets_by_node=context.walk_targets_by_node,
+            limit=10, # Increased limit for better reachability
         )
-        end_walk_result = find_nearest_station_by_walk(
+        end_candidates = find_candidate_stations_by_walk(
             request.end_lon,
             request.end_lat,
             station_coords_by_id,
@@ -693,120 +746,178 @@ async def get_gis_route_for_points(request: GisPointRouteRequest):
             None,
             walk_graph=context.walk_graph,
             targets_by_node=context.walk_targets_by_node,
+            limit=5, # Evaluate more end station candidates
         )
+
+        engine = RouteEngine(network)
+        best_candidate_pair = None
+        route_payload = None
+
+        # Try combinations to find a valid subway path
+        for s_cand in start_candidates:
+            for e_cand in end_candidates:
+                try:
+                    route_result = engine.find_route_through_stations(
+                        [
+                            s_cand.station_id,
+                            *request.via_station_ids,
+                            e_cand.station_id,
+                        ]
+                    )
+                    route_payload = route_result.to_dict()
+                    best_candidate_pair = (s_cand, e_cand)
+                    break
+                except ValueError:
+                    continue
+            if best_candidate_pair:
+                break
+
+        # FALLBACK: If no subway-involved route is found, suggest walking the whole way
+        if not best_candidate_pair:
+            # Calculate a direct walking path from start to end coordinate
+            full_walk_coords = find_walk_path(
+                request.start_lon, request.start_lat,
+                request.end_lon, request.end_lat,
+                context.walk_graph
+            )
+            # Estimate distance (coarse haversine for the summary)
+            dist_m = haversine_distance_m(request.start_lat, request.start_lon, request.end_lat, request.end_lon)
+            # Note: real distance along road might be longer, but we use this for the fallback UI
+            full_walk_time = walking_time_sec(dist_m, request.walking_m_per_sec)
+            
+            return {
+                "source": gis_payload["source"],
+                "journey_mode": "walk_fallback",
+                "start_point": {"lon": request.start_lon, "lat": request.start_lat},
+                "end_point": {"lon": request.end_lon, "lat": request.end_lat},
+                "total_journey_time_sec": full_walk_time,
+                "access_walk_path": {
+                    "type": "LineString",
+                    "coordinates": [[lon, lat] for lon, lat in full_walk_coords],
+                },
+                "access_walk_distance_m": round(dist_m, 1),
+                "access_walk_time_sec": full_walk_time,
+                "route": {
+                    "total_time_sec": full_walk_time,
+                    "walking_time_sec": full_walk_time,
+                    "steps": [
+                        {
+                            "kind": "walk",
+                            "station_id": None,
+                            "next_station_id": None,
+                            "duration_sec": full_walk_time,
+                            "coordinates": full_walk_coords
+                        }
+                    ]
+                },
+                "warnings": ["subway_unreachable_walking_fallback"]
+            }
+
+        start_walk_result, end_walk_result = best_candidate_pair
+        
         selected_start_station_id = start_walk_result.station_id
         selected_end_station_id = end_walk_result.station_id
         access_walk_distance_m = start_walk_result.distance_m
         egress_walk_distance_m = end_walk_result.distance_m
-    except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
 
-    route_payload: dict | None = None
-    try:
-        engine = RouteEngine(network)
-        route_result = engine.find_route_through_stations(
-            [
-                selected_start_station_id,
-                *request.via_station_ids,
-                selected_end_station_id,
-            ]
+        access_walk_time_sec = walking_time_sec(access_walk_distance_m, request.walking_m_per_sec)
+        egress_walk_time_sec = walking_time_sec(egress_walk_distance_m, request.walking_m_per_sec)
+        station_lookup = context.station_lookup or _station_lookup_payload()
+        route_payload = _enrich_route_payload(route_payload, context, network)
+        
+        route_geometry_features = build_route_geometry_features(
+            route_steps=route_payload.get("steps", []),
+            station_coords_by_id=station_coords_by_id,
+            stations_geojson=gis_payload.get("stations"),
+            lines_geojson=gis_payload.get("lines"),
+            precomputed_segment_index=context.geojson_segment_index,
+            geojson_line_colors=context.geojson_line_colors,
         )
-        route_payload = route_result.to_dict()
-    except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-
-    access_walk_time_sec = walking_time_sec(access_walk_distance_m, request.walking_m_per_sec)
-    egress_walk_time_sec = walking_time_sec(egress_walk_distance_m, request.walking_m_per_sec)
-    station_lookup = context.station_lookup or _station_lookup_payload()
-    route_payload = _enrich_route_payload(route_payload, station_lookup, network)
-    ride_path_features = build_ride_path_features(
-        route_steps=route_payload.get("steps", []),
-        station_coords_by_id=station_coords_by_id,
-        stations_geojson=gis_payload.get("stations"),
-        lines_geojson=gis_payload.get("lines"),
-        precomputed_segment_index=context.geojson_segment_index,
-        geojson_line_colors=context.geojson_line_colors,
-    )
-    geometry_source: str | None = None
-    has_line_features = bool((gis_payload.get("lines") or {}).get("features"))
-    if ride_path_features and not has_line_features:
-        geometry_source = "fallback_station_sequence"
-        route_quality = "degraded"
-        warnings.append("ride_geometry_fallback")
-    if not ride_path_features:
-        fallback_ride_path_features = _build_fallback_ride_path_features(
-            route_payload.get("station_ids", []),
-            station_coords_by_id,
-        )
-        if fallback_ride_path_features:
-            ride_path_features = fallback_ride_path_features
+        
+        geometry_source: str | None = None
+        has_line_features = bool((gis_payload.get("lines") or {}).get("features"))
+        if route_geometry_features and not has_line_features:
             geometry_source = "fallback_station_sequence"
             route_quality = "degraded"
             warnings.append("ride_geometry_fallback")
+            
+        if not route_geometry_features:
+            fallback_ride_path_features = _build_fallback_ride_path_features(
+                route_payload.get("station_ids", []),
+                station_coords_by_id,
+            )
+            if fallback_ride_path_features:
+                route_geometry_features = fallback_ride_path_features
+                geometry_source = "fallback_station_sequence"
+                route_quality = "degraded"
+                warnings.append("ride_geometry_fallback")
 
-    response_payload = {
-        "source": gis_payload["source"],
-        "journey_mode": "subway",
-        "start_point": {"lon": request.start_lon, "lat": request.start_lat},
-        "end_point": {"lon": request.end_lon, "lat": request.end_lat},
-        "selected_start_station": {
-            **station_lookup[selected_start_station_id],
-            "lon": station_coords_by_id[selected_start_station_id][0],
-            "lat": station_coords_by_id[selected_start_station_id][1],
-        },
-        "selected_start_access_point": {
-            "name": start_walk_result.access_point_name,
-            "lon": start_walk_result.access_point_coordinate[0],
-            "lat": start_walk_result.access_point_coordinate[1],
-        },
-        "selected_end_station": {
-            **station_lookup[selected_end_station_id],
-            "lon": station_coords_by_id[selected_end_station_id][0],
-            "lat": station_coords_by_id[selected_end_station_id][1],
-        },
-        "selected_end_access_point": {
-            "name": end_walk_result.access_point_name,
-            "lon": end_walk_result.access_point_coordinate[0],
-            "lat": end_walk_result.access_point_coordinate[1],
-        },
-        "via_stations": [
-            {
-                **station_lookup[station_id],
-                "lon": station_coords_by_id.get(station_id, (None, None))[0],
-                "lat": station_coords_by_id.get(station_id, (None, None))[1],
-            }
-            for station_id in request.via_station_ids
-        ],
-        "access_walk_path": {
-            "type": "LineString",
-            "coordinates": [
-                [path_lon, path_lat]
-                for path_lon, path_lat in start_walk_result.path_coordinates
+        response_payload = {
+            "source": gis_payload["source"],
+            "journey_mode": "subway",
+            "start_point": {"lon": request.start_lon, "lat": request.start_lat},
+            "end_point": {"lon": request.end_lon, "lat": request.end_lat},
+            "selected_start_station": {
+                **station_lookup[selected_start_station_id],
+                "lon": station_coords_by_id[selected_start_station_id][0],
+                "lat": station_coords_by_id[selected_start_station_id][1],
+            },
+            "selected_start_access_point": {
+                "name": start_walk_result.access_point_name,
+                "lon": start_walk_result.access_point_coordinate[0],
+                "lat": start_walk_result.access_point_coordinate[1],
+            },
+            "selected_end_station": {
+                **station_lookup[selected_end_station_id],
+                "lon": station_coords_by_id[selected_end_station_id][0],
+                "lat": station_coords_by_id[selected_end_station_id][1],
+            },
+            "selected_end_access_point": {
+                "name": end_walk_result.access_point_name,
+                "lon": end_walk_result.access_point_coordinate[0],
+                "lat": end_walk_result.access_point_coordinate[1],
+            },
+            "via_stations": [
+                {
+                    **station_lookup[station_id],
+                    "lon": station_coords_by_id.get(station_id, (None, None))[0],
+                    "lat": station_coords_by_id.get(station_id, (None, None))[1],
+                }
+                for station_id in request.via_station_ids
             ],
-        },
-        "egress_walk_path": {
-            "type": "LineString",
-            "coordinates": [
-                [path_lon, path_lat]
-                for path_lon, path_lat in end_walk_result.path_coordinates
-            ],
-        },
-        "access_walk_distance_m": round(access_walk_distance_m, 1),
-        "egress_walk_distance_m": round(egress_walk_distance_m, 1),
-        "access_walk_time_sec": access_walk_time_sec,
-        "egress_walk_time_sec": egress_walk_time_sec,
-        "ride_path_features": ride_path_features,
-        "total_journey_time_sec": (
-            route_payload["total_time_sec"] + access_walk_time_sec + egress_walk_time_sec
-        ),
-        "route_quality": route_quality,
-        "route": route_payload,
-    }
-    if warnings:
-        response_payload["warnings"] = sorted(set(warnings))
-    if geometry_source is not None:
-        response_payload["geometry_source"] = geometry_source
-    return response_payload
+            "access_walk_path": {
+                "type": "LineString",
+                "coordinates": [
+                    [path_lon, path_lat]
+                    for path_lon, path_lat in start_walk_result.path_coordinates
+                ],
+            },
+            "egress_walk_path": {
+                "type": "LineString",
+                "coordinates": [
+                    [path_lon, path_lat]
+                    for path_lon, path_lat in end_walk_result.path_coordinates
+                ],
+            },
+            "access_walk_distance_m": round(access_walk_distance_m, 1),
+            "egress_walk_distance_m": round(egress_walk_distance_m, 1),
+            "access_walk_time_sec": access_walk_time_sec,
+            "egress_walk_time_sec": egress_walk_time_sec,
+            "ride_path_features": route_geometry_features,
+            "total_journey_time_sec": (
+                route_payload["total_time_sec"] + access_walk_time_sec + egress_walk_time_sec
+            ),
+            "route_quality": route_quality,
+            "route": route_payload,
+        }
+        if warnings:
+            response_payload["warnings"] = sorted(set(warnings))
+        if geometry_source is not None:
+            response_payload["geometry_source"] = geometry_source
+        return response_payload
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
 
 @router.get("/builder/network")
